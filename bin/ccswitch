@@ -1,0 +1,598 @@
+#!/usr/bin/env bash
+# ccswitch — switch between multiple Claude Code accounts, securely & concurrently.
+#
+# Model:
+#   A "profile" is an isolated Claude Code config directory (CLAUDE_CONFIG_DIR).
+#   Claude Code stores each config dir's OAuth credentials in their OWN entry of
+#   the OS credential store (macOS Keychain, or a per-profile credentials file on
+#   Linux/Windows), so different shells pointed at different profiles run
+#   different accounts AT THE SAME TIME without clobbering each other.
+#
+#   ccswitch never reads, writes, or stores raw tokens. Authentication is done
+#   entirely through `claude auth {login,logout,status}`, which keeps secrets in
+#   that store. The profile directory holds only non-secret config/state, most of
+#   it symlinked from your real ~/.claude so every account keeps your full
+#   plugin/skill/command setup.
+#
+#   The special profile "default" is your existing ~/.claude (no override).
+#   Runs on macOS, Linux, and Windows (via Git Bash or WSL).
+#
+# Usage: ccswitch help
+set -uo pipefail
+
+CCSWITCH_VERSION="1.2.0"
+
+# ---- paths -------------------------------------------------------------------
+CCSWITCH_HOME="${CCSWITCH_HOME:-$HOME/.ccswitch}"
+
+# Safety guard: CCSWITCH_HOME backs rm -rf (cmd_remove, uninstall --purge), so a
+# stray/hostile value (/, $HOME, a path with .., or a symlink) must never get
+# there. Require a real path strictly under $HOME with no traversal.
+case "$CCSWITCH_HOME" in
+  *..*)        printf 'ccswitch: refusing CCSWITCH_HOME with "..": %s\n' "$CCSWITCH_HOME" >&2; exit 1 ;;
+  "$HOME"/?*)  : ;;
+  *)           printf 'ccswitch: refusing unsafe CCSWITCH_HOME=%s (must be a dir under %s)\n' "$CCSWITCH_HOME" "$HOME" >&2; exit 1 ;;
+esac
+if [ -L "$CCSWITCH_HOME" ]; then
+  printf 'ccswitch: CCSWITCH_HOME is a symlink — refusing: %s\n' "$CCSWITCH_HOME" >&2; exit 1
+fi
+
+PROFILES_DIR="$CCSWITCH_HOME/profiles"
+BASE_CONFIG="${CCSWITCH_BASE_CONFIG:-$HOME/.claude}"
+
+# How a new profile inherits your environment:
+#
+#   SYMLINK (shared, read-mostly): heavy assets Claude Code loads at startup and
+#   does not rewrite in a racy way. Sharing them means every account has your
+#   plugins/skills/commands without duplication.
+#
+#   COPY (per-profile, independent): the small config files Claude Code DOES
+#   rewrite at runtime (model choice, "always allow" permissions, MCP servers).
+#   Copying — not symlinking — means two accounts running at the same time can
+#   never race on or clobber each other's settings, and each account may diverge
+#   (different model/permissions). Refresh from base later with `ccswitch sync`.
+#
+# Everything else (sessions, projects, history, statsig, credentials) is created
+# fresh per profile, which is what makes concurrent sessions isolated.
+SHARED_SYMLINK=(plugins skills commands hooks CLAUDE.md)
+SHARED_COPY=(settings.json settings.local.json mcp_config.json)
+
+umask 077
+
+# ---- colors ------------------------------------------------------------------
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  B=$'\033[1m'; D=$'\033[2m'; R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; C=$'\033[36m'; X=$'\033[0m'
+else
+  B=""; D=""; R=""; G=""; Y=""; C=""; X=""
+fi
+
+# ---- output helpers ----------------------------------------------------------
+err()  { printf '%sccswitch:%s %s\n' "$R" "$X" "$*" >&2; }
+die()  { err "$*"; exit 1; }
+info() { printf '%s\n' "$*"; }
+ok()   { printf '%s✓%s %s\n' "$G" "$X" "$*"; }
+
+# ---- profile model -----------------------------------------------------------
+validate_name() {
+  local n="${1:-}"
+  [ -n "$n" ] || { err "profile name required"; return 1; }
+  case "$n" in
+    */*|.|..) err "invalid profile name: $n"; return 1 ;;
+  esac
+  if ! printf '%s' "$n" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
+    err "invalid profile name '$n' (use letters, digits, . _ -)"; return 1
+  fi
+  return 0
+}
+
+is_default() { [ "${1:-}" = "default" ] || [ "${1:-}" = "main" ]; }
+
+profile_dir() { printf '%s/%s' "$PROFILES_DIR" "$1"; }
+
+# Echo the CLAUDE_CONFIG_DIR for a profile (empty string = default/~/.claude).
+# Returns nonzero if the profile does not exist.
+resolve_dir() {
+  local n="${1:-}"
+  validate_name "$n" || return 1
+  if is_default "$n"; then printf ''; return 0; fi
+  local d; d="$(profile_dir "$n")"
+  if [ ! -d "$d" ]; then err "no such profile: $n  (try: ccswitch create $n)"; return 1; fi
+  printf '%s' "$d"
+}
+
+list_profiles() {
+  printf 'default\n'
+  if [ -d "$PROFILES_DIR" ]; then
+    find "$PROFILES_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort
+  fi
+}
+
+# Run `claude auth status --json` for a config dir (empty = default/ambient-unset).
+auth_status_json() {
+  local dir="${1:-}"
+  if [ -z "$dir" ]; then
+    env -u CLAUDE_CONFIG_DIR claude auth status --json 2>/dev/null
+  else
+    env CLAUDE_CONFIG_DIR="$dir" claude auth status --json 2>/dev/null
+  fi
+}
+
+# Extract one flat field from pretty-printed JSON (claude auth status is one
+# key per line). Dependency-free. JSON null → empty string.
+json_field() {
+  local key="$1"
+  grep -m1 "\"$key\"" | sed -E 's/.*: *//; s/^"//; s/",?$//; s/,$//; s/^null$//'
+}
+
+# True if a status blob looks like valid `claude auth status` output.
+status_ok() {
+  printf '%s' "$1" | grep -q '"loggedIn"'
+}
+
+# Populate a profile dir from a base config: symlink the heavy read-only assets,
+# COPY the mutable config files (so concurrent accounts never race on them).
+seed_profile() {
+  local dir="$1" base="$2" asset
+  for asset in "${SHARED_SYMLINK[@]}"; do
+    if [ -e "$base/$asset" ] && [ ! -e "$dir/$asset" ]; then
+      # Symlink where supported; fall back to a copy (e.g. Git Bash on Windows
+      # without developer mode, where ln -s can't create real symlinks).
+      ln -s "$base/$asset" "$dir/$asset" 2>/dev/null || cp -R "$base/$asset" "$dir/$asset"
+    fi
+  done
+  for asset in "${SHARED_COPY[@]}"; do
+    if [ -f "$base/$asset" ] && [ ! -e "$dir/$asset" ]; then
+      cp "$base/$asset" "$dir/$asset"   # not -p: copy CONTENT, let umask 077 apply
+      chmod 600 "$dir/$asset" 2>/dev/null || true
+    fi
+  done
+}
+
+# `claude auth login` stores valid credentials in the OS credential store but does
+# NOT set hasCompletedOnboarding in <dir>/.claude.json — so the interactive TUI re-runs
+# its onboarding/welcome flow (which looks like "log in again") even though auth
+# is valid. Mark the profile onboarded so a switched session starts straight in.
+mark_onboarded() {
+  local dir="$1" f="$1/.claude.json"
+  if command -v python3 >/dev/null 2>&1; then
+    CC_F="$f" CC_BASE="$BASE_CONFIG/.claude.json" python3 - <<'PY' 2>/dev/null || true
+import json, os
+f = os.environ["CC_F"]; base = os.environ.get("CC_BASE", "")
+try:    d = json.load(open(f)) if os.path.exists(f) else {}
+except Exception: d = {}
+d["hasCompletedOnboarding"] = True
+try:
+    b = json.load(open(base))
+    for k in ("theme", "hasCompletedProjectOnboarding"):
+        if k in b and k not in d: d[k] = b[k]
+except Exception: pass
+tmp = f + ".ccswitch.tmp"
+json.dump(d, open(tmp, "w"))
+os.replace(tmp, f); os.chmod(f, 0o600)
+PY
+  else
+    # No python3: portable JSON edit via awk + temp file (no GNU/BSD sed -i split).
+    if [ -f "$f" ] && [ "$(tr -d ' \n\t' < "$f")" != "{}" ]; then
+      if ! grep -q '"hasCompletedOnboarding"' "$f"; then
+        local t="$f.ccswitch.tmp"
+        awk 'NR==1 && /^[[:space:]]*{/ { sub(/{/, "{\"hasCompletedOnboarding\":true,"); print; next } { print }' "$f" > "$t" 2>/dev/null \
+          && mv "$t" "$f" || rm -f "$t" 2>/dev/null
+      fi
+    else
+      printf '{"hasCompletedOnboarding":true}\n' > "$f"
+    fi
+    chmod 600 "$f" 2>/dev/null || true
+  fi
+}
+
+# ---- commands ----------------------------------------------------------------
+
+cmd_create() {
+  local name="" isolated=0 do_login=1 share_from="$BASE_CONFIG"
+  local -a login_args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --isolated)    isolated=1 ;;
+      --no-login)    do_login=0 ;;
+      --share-from)  shift; share_from="${1:-}" ;;
+      --email)       shift; login_args+=(--email "${1:-}") ;;
+      --console|--sso|--claudeai) login_args+=("$1") ;;
+      -*)            die "unknown option: $1" ;;
+      *)             [ -z "$name" ] && name="$1" || die "unexpected argument: $1" ;;
+    esac
+    shift
+  done
+  validate_name "$name" || exit 1
+  is_default "$name" && die "'$name' is reserved (it is your existing ~/.claude)"
+  local dir; dir="$(profile_dir "$name")"
+  [ -e "$dir" ] && die "profile already exists: $name"
+
+  mkdir -p "$dir"
+  chmod 700 "$CCSWITCH_HOME" "$PROFILES_DIR" "$dir" 2>/dev/null || true
+
+  if [ "$isolated" -eq 0 ] && [ -d "$share_from" ]; then
+    seed_profile "$dir" "$share_from"
+  fi
+  mark_onboarded "$dir"
+  ok "created ${B}$name${X}"
+
+  if [ "$do_login" -eq 1 ]; then
+    printf 'Sign in now? [Y/n] '
+    local ans; read -r ans || ans="n"
+    case "${ans:-y}" in
+      n|N|no|NO) info "${D}later: ccswitch login $name${X}" ;;
+      *) cmd_login "$name" ${login_args[@]+"${login_args[@]}"} ;;
+    esac
+  fi
+}
+
+cmd_login() {
+  local name="${1:-}"; shift || true
+  local dir; dir="$(resolve_dir "$name")" || exit 1
+  local rc=0
+  if [ -z "$dir" ]; then
+    env -u CLAUDE_CONFIG_DIR claude auth login "$@" || rc=$?
+  else
+    env CLAUDE_CONFIG_DIR="$dir" claude auth login "$@" || rc=$?
+    # On success, skip the TUI's first-run onboarding so `claude` starts logged in.
+    [ "$rc" -eq 0 ] && mark_onboarded "$dir"
+  fi
+  return "$rc"
+}
+
+cmd_logout() {
+  local name="${1:-}"
+  local dir; dir="$(resolve_dir "$name")" || exit 1
+  local rc=0
+  if [ -z "$dir" ]; then
+    env -u CLAUDE_CONFIG_DIR claude auth logout || rc=$?
+  else
+    env CLAUDE_CONFIG_DIR="$dir" claude auth logout || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    err "logout failed for $name — stored credentials may remain"
+    return 1
+  fi
+  ok "signed out $name"
+}
+
+cmd_run() {
+  local name="${1:-}"; shift || true
+  [ "${1:-}" = "--" ] && shift
+  local dir; dir="$(resolve_dir "$name")" || exit 1
+  if [ -z "$dir" ]; then
+    exec env -u CLAUDE_CONFIG_DIR claude "$@"
+  else
+    exec env CLAUDE_CONFIG_DIR="$dir" claude "$@"
+  fi
+}
+
+# Print one status row. Marks the profile active in the current shell.
+# Optional $3 = precomputed status JSON (cmd_list fetches these in parallel).
+print_row() {
+  local name="$1" dir="$2"
+  local json loggedIn email plan
+  if [ $# -ge 3 ]; then json="$3"; else json="$(auth_status_json "$dir")"; fi
+  loggedIn="$(printf '%s' "$json" | json_field loggedIn)"
+  email="$(printf '%s' "$json" | json_field email)"
+  plan="$(printf '%s' "$json" | json_field subscriptionType)"
+
+  local active=" "
+  local cur_profile="${CCSWITCH_PROFILE:-default}"
+  if [ "$name" = "$cur_profile" ]; then active="${C}●${X}"; fi
+
+  local state
+  if ! status_ok "$json"; then
+    state="${D}unavailable${X}"
+  elif [ "$loggedIn" = "true" ]; then
+    state="${email:-?}${plan:+  ${D}$plan${X}}"
+  else
+    state="${D}not signed in${X}"
+  fi
+  printf '%b %s%-10s%s %s\n' "$active" "$B" "$name" "$X" "$state"
+}
+
+cmd_list() {
+  local tmp; tmp="$(mktemp -d)" || return 1
+  local -a names=() dirs=()
+  local i=0 name dir
+  # Fetch each profile's auth status in parallel, but CAP concurrency — each
+  # `claude auth status` spawns the (large) CLI, so an unbounded fan-out over
+  # hundreds of profiles could exhaust memory.
+  local max=8
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    if is_default "$name"; then dir=""; else dir="$(profile_dir "$name")"; fi
+    names[$i]="$name"; dirs[$i]="$dir"
+    auth_status_json "$dir" > "$tmp/$i.json" 2>/dev/null &
+    i=$((i + 1))
+    # throttle: once `max` jobs are in flight, wait for one to finish
+    # Throttle: wait for the oldest in-flight job. `wait -n` (bash 4.3+) would be
+    # nicer but isn't portable, so wait on a specific PID — works on bash 3.2+.
+    if [ "$(jobs -p | wc -l)" -ge "$max" ]; then wait "$(jobs -p | head -1)" 2>/dev/null || true; fi
+  done < <(list_profiles)
+  wait
+  local n=0
+  while [ "$n" -lt "$i" ]; do
+    print_row "${names[$n]}" "${dirs[$n]}" "$(cat "$tmp/$n.json" 2>/dev/null)"
+    n=$((n + 1))
+  done
+  rm -rf "$tmp"
+}
+
+cmd_status() {
+  local name="${1:-}"
+  if [ -z "$name" ]; then cmd_list; return; fi
+  local dir; dir="$(resolve_dir "$name")" || exit 1
+  if [ -z "$dir" ]; then
+    env -u CLAUDE_CONFIG_DIR claude auth status --text 2>/dev/null
+  else
+    env CLAUDE_CONFIG_DIR="$dir" claude auth status --text 2>/dev/null
+  fi
+}
+
+cmd_current() {
+  printf '%s●%s %s%s%s\n' "$C" "$X" "$B" "${CCSWITCH_PROFILE:-default}" "$X"
+}
+
+cmd_remove() {
+  local name="" keep=0 yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --keep-creds) keep=1 ;;
+      -y|--yes)     yes=1 ;;
+      -*)           die "unknown option: $1" ;;
+      *)            [ -z "$name" ] && name="$1" || die "unexpected argument: $1" ;;
+    esac
+    shift
+  done
+  validate_name "$name" || exit 1
+  is_default "$name" && die "refusing to remove the default profile (~/.claude)"
+  # Refuse if the profiles dir (or the profile itself) is a symlink — otherwise a
+  # planted symlink could redirect rm -rf outside the intended tree.
+  [ -L "$PROFILES_DIR" ] && die "refusing: $PROFILES_DIR is a symlink"
+  local dir; dir="$(profile_dir "$name")"
+  [ -L "$dir" ] && die "refusing: profile '$name' is a symlink"
+  [ -d "$dir" ] || die "no such profile: $name"
+
+  # Safety: the resolved real path MUST live under the real PROFILES_DIR. Resolve
+  # BOTH sides (macOS /var → /private/var). We already rejected symlinked
+  # PROFILES_DIR/profile above, so realpath can't be redirected here.
+  local real real_profiles
+  real="$(cd "$dir" 2>/dev/null && pwd -P)" || die "cannot resolve $dir"
+  real_profiles="$(cd "$PROFILES_DIR" 2>/dev/null && pwd -P)" || die "cannot resolve $PROFILES_DIR"
+  case "$real/" in
+    "$real_profiles"/?*) : ;;
+    *) die "refusing to delete path outside $real_profiles: $real" ;;
+  esac
+
+  if [ "$yes" -ne 1 ]; then
+    printf 'Remove profile %s%s%s and ' "$B" "$name" "$X"
+    [ "$keep" -eq 1 ] && printf 'KEEP its login? ' || printf 'sign it out (clear stored credentials)? '
+    printf '[y/N] '
+    local ans; read -r ans || ans="n"
+    case "${ans:-n}" in y|Y|yes|YES) : ;; *) info "Aborted."; return 0 ;; esac
+  fi
+
+  if [ "$keep" -ne 1 ]; then
+    env CLAUDE_CONFIG_DIR="$dir" claude auth logout >/dev/null 2>&1 \
+      && ok "cleared stored credentials for $name" \
+      || err "could not run auth logout (continuing to delete files)"
+  fi
+  rm -rf "$real"
+  ok "removed profile $name"
+}
+
+cmd_rename() {
+  local old="${1:-}" new="${2:-}"
+  validate_name "$old" || exit 1
+  validate_name "$new" || exit 1
+  is_default "$old" && die "cannot rename the default profile"
+  is_default "$new" && die "'$new' is reserved"
+  local od nd; od="$(profile_dir "$old")"; nd="$(profile_dir "$new")"
+  [ -d "$od" ] || die "no such profile: $old"
+  [ -e "$nd" ] && die "target already exists: $new"
+  mv "$od" "$nd"
+  ok "renamed $old → $new  ${D}(re-login needed: ccswitch login $new)${X}"
+}
+
+cmd_sync() {
+  local name="${1:-}" share_from="${2:-$BASE_CONFIG}"
+  local dir; dir="$(resolve_dir "$name")" || exit 1
+  [ -z "$dir" ] && die "'default' is your base config — nothing to sync into it"
+  [ -d "$share_from" ] || die "base config not found: $share_from"
+  local asset
+  for asset in "${SHARED_COPY[@]}"; do
+    if [ -f "$share_from/$asset" ]; then
+      rm -f "$dir/$asset"   # drop any old symlink/copy first (symlink→real copy)
+      cp "$share_from/$asset" "$dir/$asset"
+      chmod 600 "$dir/$asset" 2>/dev/null || true
+    fi
+  done
+  # Re-link any shared assets that are missing (e.g. a plugin dir added later).
+  for asset in "${SHARED_SYMLINK[@]}"; do
+    if [ -e "$share_from/$asset" ] && [ ! -e "$dir/$asset" ]; then
+      ln -s "$share_from/$asset" "$dir/$asset" 2>/dev/null || cp -R "$share_from/$asset" "$dir/$asset"
+    fi
+  done
+  mark_onboarded "$dir"   # repair profiles created before onboarding was set
+  ok "synced $name"
+}
+
+cmd_doctor() {
+  local problems=0
+  info "${B}ccswitch doctor${X}"
+
+  if command -v claude >/dev/null 2>&1; then
+    ok "claude CLI: $(claude --version 2>/dev/null | head -1)"
+  else
+    err "claude CLI not found in PATH"; problems=$((problems+1))
+  fi
+
+  case "$(uname -s 2>/dev/null)" in
+    Darwin)
+      if command -v security >/dev/null 2>&1; then
+        ok "credential store: macOS Keychain (managed by claude)"
+      else
+        err "'security' not found — Keychain unavailable"; problems=$((problems+1))
+      fi ;;
+    *)
+      ok "credential store: per-profile credentials file (managed by claude)" ;;
+  esac
+
+  if [ -d "$BASE_CONFIG" ]; then ok "base config: ${BASE_CONFIG/#$HOME/~}"; else err "base config missing: $BASE_CONFIG"; problems=$((problems+1)); fi
+
+  # shell integration loaded?
+  if [ -n "${CCSWITCH_SHELL_LOADED:-}" ]; then
+    ok "shell integration loaded (ccswitch use/unuse active)"
+  else
+    err "shell integration NOT loaded → 'ccswitch use' can't change this shell"
+    info "    add to your shell rc:  ${C}source \"$(shell_file_path)\"${X}  (or run: ccswitch shell-init)"
+    problems=$((problems+1))
+  fi
+
+  # per-profile checks
+  local name dir
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    if is_default "$name"; then dir=""; else dir="$(profile_dir "$name")"; fi
+    local json loggedIn email
+    json="$(auth_status_json "$dir")"
+    loggedIn="$(printf '%s' "$json" | json_field loggedIn)"
+    email="$(printf '%s' "$json" | json_field email)"
+    if ! status_ok "$json"; then
+      err "profile '$name' status unavailable (claude returned no JSON)"; problems=$((problems+1))
+    elif [ "$loggedIn" = "true" ]; then
+      ok "profile '$name' signed in (${email:-?})"
+    else
+      info "  ${Y}•${X} profile '$name' logged out  ${D}(ccswitch login $name)${X}"
+    fi
+    # broken symlinks?
+    if [ -n "$dir" ] && [ -d "$dir" ]; then
+      local bad; bad="$(find "$dir" -maxdepth 1 -type l ! -exec test -e {} \; -print 2>/dev/null)"
+      [ -n "$bad" ] && { err "profile '$name' has broken symlink(s): $bad"; problems=$((problems+1)); }
+      # legacy: mutable config symlinked (racy under concurrent use) — should be a copy
+      local m
+      for m in "${SHARED_COPY[@]}"; do
+        if [ -L "$dir/$m" ]; then
+          info "  ${Y}•${X} profile '$name' has symlinked $m (shared/racy) — run ${C}ccswitch sync $name${X} to isolate it"
+        fi
+      done
+    fi
+  done < <(list_profiles)
+
+  info ""
+  if [ "$problems" -eq 0 ]; then ok "all good"; else err "$problems issue(s) found"; fi
+  return 0
+}
+
+shell_file_path() {
+  # Best guess at the installed shell snippet location.
+  local self; self="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+  printf '%s/../shell/ccswitch.sh' "$self"
+}
+
+cmd_shell_init() {
+  # Emit the shell function so users can `eval "$(ccswitch shell-init)"` or
+  # source the static file. Keep in sync with shell/ccswitch.sh.
+  cat <<'SNIPPET'
+# ccswitch shell integration
+ccswitch() {
+  case "${1:-}" in
+    use)
+      if [ -z "${2:-}" ]; then command ccswitch help; return 2; fi
+      local __d
+      if ! __d="$(command ccswitch resolve "$2")"; then return 1; fi
+      if [ -z "$__d" ]; then unset CLAUDE_CONFIG_DIR; else export CLAUDE_CONFIG_DIR="$__d"; fi
+      export CCSWITCH_PROFILE="$2"
+      command ccswitch current
+      ;;
+    unuse)
+      unset CLAUDE_CONFIG_DIR CCSWITCH_PROFILE
+      command ccswitch current
+      ;;
+    *) command ccswitch "$@" ;;
+  esac
+}
+export CCSWITCH_SHELL_LOADED=1
+SNIPPET
+}
+
+cmd_help() {
+  if [ "${1:-}" = "full" ] || [ "${1:-}" = "-v" ] || [ "${1:-}" = "--verbose" ]; then cmd_help_full; return; fi
+  cat <<EOF
+${B}ccswitch${X} ${D}v${CCSWITCH_VERSION}${X} — run multiple Claude Code accounts
+
+  ${C}list${X}                     accounts + who's signed in
+  ${C}use${X} <name> / ${C}unuse${X}       switch this shell  ${D}(needs integration)${X}
+  ${C}run${X} <name> [-- args]     launch claude as <name>
+  ${C}create${X} <name>            add an account, then sign in
+  ${C}login${X} / ${C}logout${X} <name>    sign in / out
+  ${C}status${X} [name]            auth details
+  ${C}sync${X} <name>              refresh shared config into a profile
+  ${C}remove${X} / ${C}rename${X} <name>   delete / rename
+  ${C}doctor${X}                   health check
+
+  ${D}two at once →  A: ccswitch use work   B: ccswitch use personal${X}
+  ${D}ccswitch help full → options, security, what's shared${X}
+EOF
+}
+
+cmd_help_full() {
+  cat <<EOF
+${B}ccswitch${X} ${D}v${CCSWITCH_VERSION}${X} — multiple Claude Code accounts, secure & concurrent
+
+${B}CREATE OPTIONS${X}
+  --isolated                 Don't share any config (clean profile)
+  --no-login                 Create only; sign in later
+  --email <addr>             Pre-fill email on the login page
+  --share-from <dir>         Inherit config from <dir> instead of ~/.claude
+  --console | --sso | --claudeai   Login mode passthrough to 'claude auth login'
+
+${B}REMOVE OPTIONS${X}
+  -y, --yes                  Don't prompt for confirmation
+  --keep-creds               Delete files but KEEP the stored login. A later
+                             'create <same-name>' reuses it (the credential store
+                             is keyed by the profile's path).
+
+${B}SHARED vs PER-PROFILE${X}
+  Symlinked (shared):   plugins, skills, commands, hooks, CLAUDE.md
+  Copied per profile:   settings.json, settings.local.json, mcp_config.json
+                        (concurrent accounts never race; 'ccswitch sync' re-copies)
+  Fresh per profile:    sessions, projects, history, credentials
+  Custom hooks run with CLAUDE_CONFIG_DIR set to the active profile — keep them
+  account-agnostic if you run accounts concurrently.
+
+${B}SECURITY${X}
+  Tokens stay in the OS credential store (macOS Keychain, or a per-profile
+  credentials file on Linux/Windows), managed by 'claude auth'. ccswitch stores
+  ZERO secrets itself. Profiles under ${PROFILES_DIR/#$HOME/~} (0700).
+  'default' = your existing ~/.claude (nothing to migrate).
+EOF
+}
+
+# ---- dispatch ----------------------------------------------------------------
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    list|ls)            cmd_list "$@" ;;
+    create|new)         cmd_create "$@" ;;
+    login)              cmd_login "$@" ;;
+    logout)             cmd_logout "$@" ;;
+    run|launch|exec)    cmd_run "$@" ;;
+    use|unuse)          die "'$cmd' needs shell integration → restart your shell or re-source your rc (or: ccswitch shell-init)" ;;
+    current|active)     cmd_current "$@" ;;
+    status|st)          cmd_status "$@" ;;
+    sync)               cmd_sync "$@" ;;
+    remove|rm|delete)   cmd_remove "$@" ;;
+    rename|mv)          cmd_rename "$@" ;;
+    resolve)            resolve_dir "${1:-}" ;;   # internal: used by shell fn
+    doctor)             cmd_doctor "$@" ;;
+    shell-init)         cmd_shell_init "$@" ;;
+    version|--version|-V) printf 'ccswitch %s\n' "$CCSWITCH_VERSION" ;;
+    help|-h|--help)     cmd_help "$@" ;;
+    *)                  err "unknown command: $cmd"; info "run 'ccswitch help'"; exit 1 ;;
+  esac
+}
+
+main "$@"

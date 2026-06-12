@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# editor scratch
+*.swp
+*~
+
+# ccswitch runtime lives in $HOME/.ccswitch, never inside the repo —
+# nothing generated here, but ignore stray local notes just in case
+*.local
