@@ -5,6 +5,7 @@
 *.swp
 *~
 
-# ccswitch runtime lives in $HOME/.ccswitch, never inside the repo —
+# ccenv runtime lives in $HOME/.ccenv, never inside the repo —
 # nothing generated here, but ignore stray local notes just in case
 *.local
+.gstack/

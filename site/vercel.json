@@ -1,0 +1,33 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "headers": [
+    {
+      "source": "/install.sh",
+      "headers": [
+        { "key": "Content-Type", "value": "text/plain; charset=utf-8" },
+        { "key": "Cache-Control", "value": "public, max-age=0, s-maxage=300, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/uninstall.sh",
+      "headers": [
+        { "key": "Content-Type", "value": "text/plain; charset=utf-8" },
+        { "key": "Cache-Control", "value": "public, max-age=0, s-maxage=300, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/bin/ccenv",
+      "headers": [
+        { "key": "Content-Type", "value": "text/plain; charset=utf-8" },
+        { "key": "Cache-Control", "value": "public, max-age=0, s-maxage=300, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/shell/ccenv.sh",
+      "headers": [
+        { "key": "Content-Type", "value": "text/plain; charset=utf-8" },
+        { "key": "Cache-Control", "value": "public, max-age=0, s-maxage=300, must-revalidate" }
+      ]
+    }
+  ]
+}

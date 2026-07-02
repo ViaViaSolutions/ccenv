@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ccswitch — switch between multiple Claude Code accounts, securely & concurrently.
+# ccenv — switch between multiple Claude Code accounts, securely & concurrently.
 #
 # Model:
 #   A "profile" is an isolated Claude Code config directory (CLAUDE_CONFIG_DIR).
@@ -8,7 +8,7 @@
 #   Linux/Windows), so different shells pointed at different profiles run
 #   different accounts AT THE SAME TIME without clobbering each other.
 #
-#   ccswitch never reads, writes, or stores raw tokens. Authentication is done
+#   ccenv never reads, writes, or stores raw tokens. Authentication is done
 #   entirely through `claude auth {login,logout,status}`, which keeps secrets in
 #   that store. The profile directory holds only non-secret config/state, most of
 #   it symlinked from your real ~/.claude so every account keeps your full
@@ -17,28 +17,34 @@
 #   The special profile "default" is your existing ~/.claude (no override).
 #   Runs on macOS, Linux, and Windows (via Git Bash or WSL).
 #
-# Usage: ccswitch help
+# Usage: ccenv help
 set -uo pipefail
 
-CCSWITCH_VERSION="1.2.0"
+CCENV_VERSION="1.4.0"
 
 # ---- paths -------------------------------------------------------------------
-CCSWITCH_HOME="${CCSWITCH_HOME:-$HOME/.ccswitch}"
+CCENV_HOME="${CCENV_HOME:-$HOME/.ccenv}"
 
-# Safety guard: CCSWITCH_HOME backs rm -rf (cmd_remove, uninstall --purge), so a
+# Normalize away trailing slashes BEFORE validating: "$HOME//" would otherwise
+# slip past the case guard below (? matches / inside a case pattern) and
+# "link/" past the -L check (test follows a trailing-slash symlink) — either
+# could aim rm -rf somewhere catastrophic.
+while [ "${CCENV_HOME%/}" != "$CCENV_HOME" ]; do CCENV_HOME="${CCENV_HOME%/}"; done
+
+# Safety guard: CCENV_HOME backs rm -rf (cmd_remove, uninstall --purge), so a
 # stray/hostile value (/, $HOME, a path with .., or a symlink) must never get
 # there. Require a real path strictly under $HOME with no traversal.
-case "$CCSWITCH_HOME" in
-  *..*)        printf 'ccswitch: refusing CCSWITCH_HOME with "..": %s\n' "$CCSWITCH_HOME" >&2; exit 1 ;;
+case "$CCENV_HOME" in
+  *..*)        printf 'ccenv: refusing CCENV_HOME with "..": %s\n' "$CCENV_HOME" >&2; exit 1 ;;
   "$HOME"/?*)  : ;;
-  *)           printf 'ccswitch: refusing unsafe CCSWITCH_HOME=%s (must be a dir under %s)\n' "$CCSWITCH_HOME" "$HOME" >&2; exit 1 ;;
+  *)           printf 'ccenv: refusing unsafe CCENV_HOME=%s (must be a dir under %s)\n' "$CCENV_HOME" "$HOME" >&2; exit 1 ;;
 esac
-if [ -L "$CCSWITCH_HOME" ]; then
-  printf 'ccswitch: CCSWITCH_HOME is a symlink — refusing: %s\n' "$CCSWITCH_HOME" >&2; exit 1
+if [ -L "$CCENV_HOME" ]; then
+  printf 'ccenv: CCENV_HOME is a symlink — refusing: %s\n' "$CCENV_HOME" >&2; exit 1
 fi
 
-PROFILES_DIR="$CCSWITCH_HOME/profiles"
-BASE_CONFIG="${CCSWITCH_BASE_CONFIG:-$HOME/.claude}"
+PROFILES_DIR="$CCENV_HOME/profiles"
+BASE_CONFIG="${CCENV_BASE_CONFIG:-$HOME/.claude}"
 
 # How a new profile inherits your environment:
 #
@@ -50,7 +56,7 @@ BASE_CONFIG="${CCSWITCH_BASE_CONFIG:-$HOME/.claude}"
 #   rewrite at runtime (model choice, "always allow" permissions, MCP servers).
 #   Copying — not symlinking — means two accounts running at the same time can
 #   never race on or clobber each other's settings, and each account may diverge
-#   (different model/permissions). Refresh from base later with `ccswitch sync`.
+#   (different model/permissions). Refresh from base later with `ccenv sync`.
 #
 # Everything else (sessions, projects, history, statsig, credentials) is created
 # fresh per profile, which is what makes concurrent sessions isolated.
@@ -67,10 +73,27 @@ else
 fi
 
 # ---- output helpers ----------------------------------------------------------
-err()  { printf '%sccswitch:%s %s\n' "$R" "$X" "$*" >&2; }
+err()  { printf '%sccenv:%s %s\n' "$R" "$X" "$*" >&2; }
 die()  { err "$*"; exit 1; }
 info() { printf '%s\n' "$*"; }
 ok()   { printf '%s✓%s %s\n' "$G" "$X" "$*"; }
+warn() { printf '%s!%s %s\n' "$Y" "$X" "$*"; }
+
+# Portable octal file mode. Gate on uname — on GNU stat, `-f` means
+# --file-system and would pollute the captured output instead of failing clean.
+file_mode() {
+  case "$(uname -s 2>/dev/null)" in
+    Darwin|*BSD*) stat -f '%Lp' "$1" 2>/dev/null ;;
+    *)            stat -c '%a'  "$1" 2>/dev/null ;;
+  esac
+}
+
+# Download a URL to a file with curl or wget (used by `ccenv update`).
+fetch() { # url dest
+  if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then wget -qO "$2" "$1"
+  else err "need curl or wget to reach the network"; return 1; fi
+}
 
 # ---- profile model -----------------------------------------------------------
 validate_name() {
@@ -96,7 +119,7 @@ resolve_dir() {
   validate_name "$n" || return 1
   if is_default "$n"; then printf ''; return 0; fi
   local d; d="$(profile_dir "$n")"
-  if [ ! -d "$d" ]; then err "no such profile: $n  (try: ccswitch create $n)"; return 1; fi
+  if [ ! -d "$d" ]; then err "no such profile: $n  (try: ccenv create $n)"; return 1; fi
   printf '%s' "$d"
 }
 
@@ -166,7 +189,7 @@ try:
     for k in ("theme", "hasCompletedProjectOnboarding"):
         if k in b and k not in d: d[k] = b[k]
 except Exception: pass
-tmp = f + ".ccswitch.tmp"
+tmp = f + ".ccenv.tmp"
 json.dump(d, open(tmp, "w"))
 os.replace(tmp, f); os.chmod(f, 0o600)
 PY
@@ -174,7 +197,7 @@ PY
     # No python3: portable JSON edit via awk + temp file (no GNU/BSD sed -i split).
     if [ -f "$f" ] && [ "$(tr -d ' \n\t' < "$f")" != "{}" ]; then
       if ! grep -q '"hasCompletedOnboarding"' "$f"; then
-        local t="$f.ccswitch.tmp"
+        local t="$f.ccenv.tmp"
         awk 'NR==1 && /^[[:space:]]*{/ { sub(/{/, "{\"hasCompletedOnboarding\":true,"); print; next } { print }' "$f" > "$t" 2>/dev/null \
           && mv "$t" "$f" || rm -f "$t" 2>/dev/null
       fi
@@ -208,7 +231,7 @@ cmd_create() {
   [ -e "$dir" ] && die "profile already exists: $name"
 
   mkdir -p "$dir"
-  chmod 700 "$CCSWITCH_HOME" "$PROFILES_DIR" "$dir" 2>/dev/null || true
+  chmod 700 "$CCENV_HOME" "$PROFILES_DIR" "$dir" 2>/dev/null || true
 
   if [ "$isolated" -eq 0 ] && [ -d "$share_from" ]; then
     seed_profile "$dir" "$share_from"
@@ -220,7 +243,7 @@ cmd_create() {
     printf 'Sign in now? [Y/n] '
     local ans; read -r ans || ans="n"
     case "${ans:-y}" in
-      n|N|no|NO) info "${D}later: ccswitch login $name${X}" ;;
+      n|N|no|NO) info "${D}later: ccenv login $name${X}" ;;
       *) cmd_login "$name" ${login_args[@]+"${login_args[@]}"} ;;
     esac
   fi
@@ -278,7 +301,7 @@ print_row() {
   plan="$(printf '%s' "$json" | json_field subscriptionType)"
 
   local active=" "
-  local cur_profile="${CCSWITCH_PROFILE:-default}"
+  local cur_profile="${CCENV_PROFILE:-default}"
   if [ "$name" = "$cur_profile" ]; then active="${C}●${X}"; fi
 
   local state
@@ -332,7 +355,7 @@ cmd_status() {
 }
 
 cmd_current() {
-  printf '%s●%s %s%s%s\n' "$C" "$X" "$B" "${CCSWITCH_PROFILE:-default}" "$X"
+  printf '%s●%s %s%s%s\n' "$C" "$X" "$B" "${CCENV_PROFILE:-default}" "$X"
 }
 
 cmd_remove() {
@@ -393,7 +416,7 @@ cmd_rename() {
   [ -d "$od" ] || die "no such profile: $old"
   [ -e "$nd" ] && die "target already exists: $new"
   mv "$od" "$nd"
-  ok "renamed $old → $new  ${D}(re-login needed: ccswitch login $new)${X}"
+  ok "renamed $old → $new  ${D}(re-login needed: ccenv login $new)${X}"
 }
 
 cmd_sync() {
@@ -421,7 +444,7 @@ cmd_sync() {
 
 cmd_doctor() {
   local problems=0
-  info "${B}ccswitch doctor${X}"
+  info "${B}ccenv doctor${X}"
 
   if command -v claude >/dev/null 2>&1; then
     ok "claude CLI: $(claude --version 2>/dev/null | head -1)"
@@ -443,11 +466,11 @@ cmd_doctor() {
   if [ -d "$BASE_CONFIG" ]; then ok "base config: ${BASE_CONFIG/#$HOME/~}"; else err "base config missing: $BASE_CONFIG"; problems=$((problems+1)); fi
 
   # shell integration loaded?
-  if [ -n "${CCSWITCH_SHELL_LOADED:-}" ]; then
-    ok "shell integration loaded (ccswitch use/unuse active)"
+  if [ -n "${CCENV_SHELL_LOADED:-}" ]; then
+    ok "shell integration loaded (ccenv use/unuse active)"
   else
-    err "shell integration NOT loaded → 'ccswitch use' can't change this shell"
-    info "    add to your shell rc:  ${C}source \"$(shell_file_path)\"${X}  (or run: ccswitch shell-init)"
+    err "shell integration NOT loaded → 'ccenv use' can't change this shell"
+    info "    add to your shell rc:  ${C}source \"$(shell_file_path)\"${X}  (or run: ccenv shell-init)"
     problems=$((problems+1))
   fi
 
@@ -465,7 +488,7 @@ cmd_doctor() {
     elif [ "$loggedIn" = "true" ]; then
       ok "profile '$name' signed in (${email:-?})"
     else
-      info "  ${Y}•${X} profile '$name' logged out  ${D}(ccswitch login $name)${X}"
+      info "  ${Y}•${X} profile '$name' logged out  ${D}(ccenv login $name)${X}"
     fi
     # broken symlinks?
     if [ -n "$dir" ] && [ -d "$dir" ]; then
@@ -475,7 +498,7 @@ cmd_doctor() {
       local m
       for m in "${SHARED_COPY[@]}"; do
         if [ -L "$dir/$m" ]; then
-          info "  ${Y}•${X} profile '$name' has symlinked $m (shared/racy) — run ${C}ccswitch sync $name${X} to isolate it"
+          info "  ${Y}•${X} profile '$name' has symlinked $m (shared/racy) — run ${C}ccenv sync $name${X} to isolate it"
         fi
       done
     fi
@@ -486,42 +509,262 @@ cmd_doctor() {
   return 0
 }
 
+# Absolute path of the ccenv binary that is currently running.
+self_path() {
+  local s="${BASH_SOURCE[0]:-$0}"
+  case "$s" in
+    */*) : ;;                                   # already a path
+    *)   s="$(command -v "$s" 2>/dev/null)" || return 1 ;;  # bare name → resolve on PATH
+  esac
+  # Absolutize the directory (pwd -P resolves the DIR's symlinks) but keep the
+  # basename so a symlinked install is still detected as a symlink by the caller.
+  local d; d="$(cd "$(dirname "$s")" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/%s' "$d" "$(basename "$s")"
+}
+
+# Extract CCENV_VERSION="x.y.z" from a ccenv script file.
+version_of() { grep -m1 'CCENV_VERSION=' "$1" 2>/dev/null | sed -E 's/.*CCENV_VERSION="?([^"]*)"?.*/\1/'; }
+
+# Update ccenv in place to the latest build published at CCENV_BASE_URL.
+#   - copy/web install (a real file): download, verify, atomically swap it in.
+#   - clone install (symlink into a git repo): `git pull` the repo instead.
+cmd_update() {
+  local base="${CCENV_BASE_URL:-https://ccenv.dev}" force=0 check=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --check)  check=1 ;;
+      --force)  force=1 ;;
+      *)        die "unknown option: $1  (usage: ccenv update [--check] [--force])" ;;
+    esac
+    shift
+  done
+
+  local self; self="$(self_path)" || die "cannot locate the running ccenv binary to update"
+
+  # Clone install: the PATH entry is a symlink into a git working tree. Updating
+  # by overwriting would fight git, so pull instead.
+  if [ -L "$self" ]; then
+    local tgt; tgt="$(readlink "$self")"
+    case "$tgt" in /*) : ;; *) tgt="$(cd "$(dirname "$self")" && cd "$(dirname "$tgt")" 2>/dev/null && pwd -P)/$(basename "$tgt")" ;; esac
+    local repo; repo="$(cd "$(dirname "$tgt")/.." 2>/dev/null && pwd -P || true)"
+    if [ -n "$repo" ] && [ -d "$repo/.git" ]; then
+      info "ccenv is a clone install at ${repo/#$HOME/~}"
+      [ "$check" -eq 1 ] && { info "  ${D}update with: git -C ${repo/#$HOME/~} pull${X}"; return 0; }
+      command -v git >/dev/null 2>&1 || die "git not found — update manually: git -C $repo pull && $repo/install.sh"
+      ( cd "$repo" && git pull --ff-only ) || die "git pull failed in $repo"
+      ok "updated via git pull  ${D}(re-run $repo/install.sh if the shell snippet changed)${X}"
+      return 0
+    fi
+    # symlink to somewhere that isn't a git repo → fall through and replace it.
+  fi
+
+  # Copy/web install: fetch the latest binary into a temp file NEXT TO the target
+  # (so the final rename is atomic and stays on the same filesystem).
+  local dir; dir="$(dirname "$self")"
+  [ -w "$dir" ] || die "cannot update: $dir is not writable (re-run the installer, or use sudo)"
+
+  local tmp; tmp="$(mktemp "$self.ccenv-update.XXXXXX")" || die "cannot create temp file in $dir"
+  # No EXIT trap: $tmp is function-local and would be unbound (set -u) when the
+  # trap fired at process exit. Clean up explicitly on every path instead.
+
+  info "checking $base for the latest ccenv…"
+  fetch "$base/bin/ccenv" "$tmp" || { rm -f "$tmp"; die "download failed: $base/bin/ccenv"; }
+  # Reject HTML error pages / truncated bodies before trusting the file.
+  { head -n1 "$tmp" | grep -q '^#!' && grep -q 'CCENV_VERSION=' "$tmp"; } \
+    || { rm -f "$tmp"; die "downloaded file doesn't look like ccenv — aborting (nothing changed)"; }
+
+  local newver oldver; newver="$(version_of "$tmp")"; oldver="$CCENV_VERSION"
+  if [ "$newver" = "$oldver" ] && [ "$force" -eq 0 ]; then
+    rm -f "$tmp"; ok "already up to date (v$oldver)"; return 0
+  fi
+  if [ "$check" -eq 1 ]; then
+    rm -f "$tmp"; info "current v$oldver → available ${B}v$newver${X}   ${D}run: ccenv update${X}"; return 0
+  fi
+
+  # Preserve the existing binary's mode; guarantee it stays executable.
+  local perm; perm="$(file_mode "$self")"; [ -n "$perm" ] && chmod "$perm" "$tmp" 2>/dev/null
+  chmod +x "$tmp" 2>/dev/null || true
+  # Atomic swap: rename replaces the directory entry with a NEW inode; the
+  # currently-running process keeps reading the old inode, so this is safe.
+  mv "$tmp" "$self" || { rm -f "$tmp"; die "could not replace $self"; }
+
+  # Best-effort refresh of the installed shell snippet too (harmless if absent).
+  if [ -f "$CCENV_HOME/shell/ccenv.sh" ]; then
+    local stmp; stmp="$(mktemp "$CCENV_HOME/shell/ccenv.sh.XXXXXX" 2>/dev/null)" || stmp=""
+    if [ -n "$stmp" ] && fetch "$base/shell/ccenv.sh" "$stmp" 2>/dev/null && grep -q 'CCENV_SHELL_LOADED' "$stmp"; then
+      chmod 600 "$stmp" 2>/dev/null || true
+      mv "$stmp" "$CCENV_HOME/shell/ccenv.sh" && info "  ${D}refreshed shell integration snippet${X}"
+    else
+      [ -n "$stmp" ] && rm -f "$stmp"
+    fi
+  fi
+
+  if [ "$newver" = "$oldver" ]; then ok "reinstalled ccenv v$newver"; else ok "updated ccenv v$oldver → ${B}v$newver${X}"; fi
+  info "  ${D}restart open shells to pick up the refreshed integration${X}"
+}
+
+# Atomically strip ccenv-marked lines from an rc file (preserve mode; temp
+# in the same dir so the final mv is atomic). Keep in sync with uninstall.sh.
+prune_rc() {
+  local rc="$1" tmp perm t hops=0
+  grep -qF "# >>> ccenv " "$rc" 2>/dev/null || return 0
+  # Follow a symlinked rc (stow/chezmoi dotfiles) to its physical file so the
+  # atomic mv rewrites the target instead of replacing the user's symlink.
+  while [ -L "$rc" ] && [ "$hops" -lt 10 ]; do
+    t="$(readlink "$rc")" || break
+    case "$t" in /*) rc="$t" ;; *) rc="$(dirname "$rc")/$t" ;; esac
+    hops=$((hops + 1))
+  done
+  tmp="$(mktemp "${rc}.ccenv.XXXXXX")" || return 1
+  grep -vF "# >>> ccenv " "$rc" > "$tmp" || true
+  perm="$(file_mode "$rc")"; [ -n "$perm" ] && chmod "$perm" "$tmp" 2>/dev/null
+  mv "$tmp" "$rc" && ok "removed ccenv lines from ${rc/#$HOME/~}"
+  rm -f "$tmp" 2>/dev/null   # no-op after a successful mv; cleans up on failure
+}
+
+# Self-uninstall. The twin of the repo's uninstall.sh (keep the two in sync),
+# but self-contained so it works even when the repo clone is gone or the binary
+# was installed as a copy (Git Bash). Deleting the running script is safe: the
+# whole file is parsed before main() runs, and on unix the inode outlives the
+# unlink anyway. Profiles and logins are kept unless --purge.
+cmd_uninstall() {
+  local purge=0 yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --purge)  purge=1 ;;
+      -y|--yes) yes=1 ;;
+      *)        die "unknown option: $1  (usage: ccenv uninstall [--purge] [-y])" ;;
+    esac
+    shift
+  done
+
+  if [ "$yes" -ne 1 ]; then
+    if [ "$purge" -eq 1 ]; then
+      printf 'Uninstall ccenv and %sDELETE ALL PROFILES%s (signs every account out)? [y/N] ' "$R" "$X"
+    else
+      printf 'Uninstall ccenv? Profiles at %s are kept. [y/N] ' "${PROFILES_DIR/#$HOME/~}"
+    fi
+    local ans; read -r ans || ans="n"
+    case "${ans:-n}" in y|Y|yes|YES) : ;; *) info "Aborted."; return 2 ;; esac
+  fi
+
+  # Resolve where we run from: self_dir joins the bin-dir candidates (covers a
+  # custom CCENV_BIN_DIR from install time), and the symlink target tells the
+  # user where the repo clone lives so they can delete it themselves.
+  local self self_dir="" target repo=""
+  self="${BASH_SOURCE[0]:-$0}"
+  self_dir="$(cd "$(dirname "$self")" 2>/dev/null && pwd -P)" || self_dir=""
+  if [ -L "$self" ] && target="$(readlink "$self" 2>/dev/null)"; then
+    case "$target" in /*) : ;; *) target="$(dirname "$self")/$target" ;; esac
+    repo="$(cd "$(dirname "$target")/.." 2>/dev/null && pwd -P)" || repo=""
+  elif [ -f "$self_dir/../install.sh" ] && [ -f "$self_dir/../shell/ccenv.sh" ]; then
+    # invoked straight from a checkout (./bin/ccenv) — that IS the repo
+    repo="$(cd "$self_dir/.." 2>/dev/null && pwd -P)" || repo=""
+  fi
+
+  # 1. remove the installed command from any dir the installer may have used.
+  local d removed=0
+  for d in "$self_dir" "${CCENV_BIN_DIR:-}" /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" "$HOME/bin"; do
+    [ -n "$d" ] || continue
+    if [ -L "$d/ccenv" ]; then
+      rm -f "$d/ccenv" && ok "removed $d/ccenv" && removed=1
+    elif [ -f "$d/ccenv" ] && grep -q 'CCENV_VERSION=' "$d/ccenv" 2>/dev/null; then
+      # copy-mode install: only delete a file we can prove is ours — and never
+      # a repo checkout's own bin/ccenv (e.g. ./bin/ccenv uninstall).
+      if [ -f "$d/../install.sh" ] && [ -f "$d/../shell/ccenv.sh" ]; then continue; fi
+      rm -f "$d/ccenv" && ok "removed $d/ccenv (copied binary)" && removed=1
+    fi
+  done
+  [ "$removed" -eq 0 ] && warn "no installed ccenv found in the usual bin dirs"
+
+  # 2. strip the PATH / shell-integration lines from the rc files.
+  local rc
+  while IFS= read -r rc; do
+    [ -f "$rc" ] && prune_rc "$rc"
+  done < <(printf '%s\n' "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.zshrc" "$HOME/.bashrc" | sort -u)
+
+  # 3. remove the installed shell snippet (orphaned once the rc line is gone).
+  if [ -f "$CCENV_HOME/shell/ccenv.sh" ]; then
+    rm -f "$CCENV_HOME/shell/ccenv.sh" && ok "removed installed shell snippet"
+    rmdir "$CCENV_HOME/shell" 2>/dev/null || true
+  fi
+
+  # 4. profiles: keep by default, sign out + delete with --purge.
+  if [ "$purge" -eq 1 ]; then
+    local failures="" p
+    if [ -d "$PROFILES_DIR" ]; then
+      if ! command -v claude >/dev/null 2>&1; then
+        warn "claude not on PATH — cannot sign profiles out; stored credentials may remain"
+      else
+        for p in "$PROFILES_DIR"/*/; do
+          [ -d "$p" ] || continue
+          if env CLAUDE_CONFIG_DIR="${p%/}" claude auth logout >/dev/null 2>&1; then
+            ok "signed out $(basename "$p")"
+          else
+            failures="$failures $(basename "$p")"
+          fi
+        done
+      fi
+    fi
+    [ -n "$failures" ] && warn "logout failed for:$failures — stored credentials may remain (macOS: remove 'Claude Code-credentials*' from Keychain Access; Linux/Windows: clear with 'claude auth logout')"
+    rm -rf "$CCENV_HOME"   # guarded at startup: real dir under $HOME, no '..'
+    ok "deleted ${CCENV_HOME/#$HOME/~} (all profiles)"
+  else
+    warn "profiles kept at ${PROFILES_DIR/#$HOME/~} — sign out with 'claude auth logout' (CLAUDE_CONFIG_DIR=<profile dir>) before deleting them by hand, or reinstall and run 'ccenv uninstall --purge'"
+  fi
+
+  [ -n "$repo" ] && info "  ${D}repo clone remains at ${repo/#$HOME/~} — delete it when you're done${X}"
+  info "  ${D}open shells: restart them (or: unset -f ccenv; unset CLAUDE_CONFIG_DIR CCENV_PROFILE)${X}"
+  ok "uninstalled"
+}
+
 shell_file_path() {
   # Best guess at the installed shell snippet location.
   local self; self="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
-  printf '%s/../shell/ccswitch.sh' "$self"
+  printf '%s/../shell/ccenv.sh' "$self"
 }
 
 cmd_shell_init() {
-  # Emit the shell function so users can `eval "$(ccswitch shell-init)"` or
-  # source the static file. Keep in sync with shell/ccswitch.sh.
+  # Emit the shell function so users can `eval "$(ccenv shell-init)"` or
+  # source the static file. Keep in sync with shell/ccenv.sh.
   cat <<'SNIPPET'
-# ccswitch shell integration
-ccswitch() {
+# ccenv shell integration
+ccenv() {
   case "${1:-}" in
     use)
-      if [ -z "${2:-}" ]; then command ccswitch help; return 2; fi
+      if [ -z "${2:-}" ]; then command ccenv help; return 2; fi
       local __d
-      if ! __d="$(command ccswitch resolve "$2")"; then return 1; fi
+      if ! __d="$(command ccenv resolve "$2")"; then return 1; fi
       if [ -z "$__d" ]; then unset CLAUDE_CONFIG_DIR; else export CLAUDE_CONFIG_DIR="$__d"; fi
-      export CCSWITCH_PROFILE="$2"
-      command ccswitch current
+      export CCENV_PROFILE="$2"
+      command ccenv current
       ;;
     unuse)
-      unset CLAUDE_CONFIG_DIR CCSWITCH_PROFILE
-      command ccswitch current
+      unset CLAUDE_CONFIG_DIR CCENV_PROFILE
+      command ccenv current
       ;;
-    *) command ccswitch "$@" ;;
+    uninstall)
+      command ccenv "$@"
+      local __rc=$?
+      case "$__rc" in
+        126|127) echo "ccenv binary already gone — cleared this shell's integration (repo leftovers: ./uninstall.sh)" >&2 ;;
+        0) : ;;
+        *) return "$__rc" ;;
+      esac
+      unset CLAUDE_CONFIG_DIR CCENV_PROFILE CCENV_SHELL_LOADED
+      unset -f ccenv
+      ;;
+    *) command ccenv "$@" ;;
   esac
 }
-export CCSWITCH_SHELL_LOADED=1
+export CCENV_SHELL_LOADED=1
 SNIPPET
 }
 
 cmd_help() {
   if [ "${1:-}" = "full" ] || [ "${1:-}" = "-v" ] || [ "${1:-}" = "--verbose" ]; then cmd_help_full; return; fi
   cat <<EOF
-${B}ccswitch${X} ${D}v${CCSWITCH_VERSION}${X} — run multiple Claude Code accounts
+${B}ccenv${X} ${D}v${CCENV_VERSION}${X} — run multiple Claude Code accounts
 
   ${C}list${X}                     accounts + who's signed in
   ${C}use${X} <name> / ${C}unuse${X}       switch this shell  ${D}(needs integration)${X}
@@ -532,15 +775,17 @@ ${B}ccswitch${X} ${D}v${CCSWITCH_VERSION}${X} — run multiple Claude Code accou
   ${C}sync${X} <name>              refresh shared config into a profile
   ${C}remove${X} / ${C}rename${X} <name>   delete / rename
   ${C}doctor${X}                   health check
+  ${C}update${X}                   fetch the latest ccenv from ccenv.dev
+  ${C}uninstall${X} [--purge]      remove ccenv itself  ${D}(--purge: profiles too)${X}
 
-  ${D}two at once →  A: ccswitch use work   B: ccswitch use personal${X}
-  ${D}ccswitch help full → options, security, what's shared${X}
+  ${D}two at once →  A: ccenv use work   B: ccenv use personal${X}
+  ${D}ccenv help full → options, security, what's shared${X}
 EOF
 }
 
 cmd_help_full() {
   cat <<EOF
-${B}ccswitch${X} ${D}v${CCSWITCH_VERSION}${X} — multiple Claude Code accounts, secure & concurrent
+${B}ccenv${X} ${D}v${CCENV_VERSION}${X} — multiple Claude Code accounts, secure & concurrent
 
 ${B}CREATE OPTIONS${X}
   --isolated                 Don't share any config (clean profile)
@@ -555,17 +800,31 @@ ${B}REMOVE OPTIONS${X}
                              'create <same-name>' reuses it (the credential store
                              is keyed by the profile's path).
 
+${B}UPDATE OPTIONS${X}
+  ccenv update               Fetch the latest build and swap it in atomically.
+                             A clone install is updated with 'git pull' instead.
+  --check                    Report the available version without changing anything
+  --force                    Reinstall even if already on the latest version
+                             (origin: CCENV_BASE_URL, default https://ccenv.dev)
+
+${B}UNINSTALL OPTIONS${X}
+  ccenv uninstall         Remove the installed command, rc lines, and shell
+                             snippet. Profiles and logins are KEPT.
+  --purge                    Also sign out every profile and delete ~/.ccenv
+  -y, --yes                  Don't prompt for confirmation
+                             (repo fallback: ./uninstall.sh [--purge])
+
 ${B}SHARED vs PER-PROFILE${X}
   Symlinked (shared):   plugins, skills, commands, hooks, CLAUDE.md
   Copied per profile:   settings.json, settings.local.json, mcp_config.json
-                        (concurrent accounts never race; 'ccswitch sync' re-copies)
+                        (concurrent accounts never race; 'ccenv sync' re-copies)
   Fresh per profile:    sessions, projects, history, credentials
   Custom hooks run with CLAUDE_CONFIG_DIR set to the active profile — keep them
   account-agnostic if you run accounts concurrently.
 
 ${B}SECURITY${X}
   Tokens stay in the OS credential store (macOS Keychain, or a per-profile
-  credentials file on Linux/Windows), managed by 'claude auth'. ccswitch stores
+  credentials file on Linux/Windows), managed by 'claude auth'. ccenv stores
   ZERO secrets itself. Profiles under ${PROFILES_DIR/#$HOME/~} (0700).
   'default' = your existing ~/.claude (nothing to migrate).
 EOF
@@ -580,7 +839,7 @@ main() {
     login)              cmd_login "$@" ;;
     logout)             cmd_logout "$@" ;;
     run|launch|exec)    cmd_run "$@" ;;
-    use|unuse)          die "'$cmd' needs shell integration → restart your shell or re-source your rc (or: ccswitch shell-init)" ;;
+    use|unuse)          die "'$cmd' needs shell integration → restart your shell or re-source your rc (or: ccenv shell-init)" ;;
     current|active)     cmd_current "$@" ;;
     status|st)          cmd_status "$@" ;;
     sync)               cmd_sync "$@" ;;
@@ -588,10 +847,12 @@ main() {
     rename|mv)          cmd_rename "$@" ;;
     resolve)            resolve_dir "${1:-}" ;;   # internal: used by shell fn
     doctor)             cmd_doctor "$@" ;;
+    update|upgrade)     cmd_update "$@" ;;
+    uninstall)          cmd_uninstall "$@" ;;
     shell-init)         cmd_shell_init "$@" ;;
-    version|--version|-V) printf 'ccswitch %s\n' "$CCSWITCH_VERSION" ;;
+    version|--version|-V) printf 'ccenv %s\n' "$CCENV_VERSION" ;;
     help|-h|--help)     cmd_help "$@" ;;
-    *)                  err "unknown command: $cmd"; info "run 'ccswitch help'"; exit 1 ;;
+    *)                  err "unknown command: $cmd"; info "run 'ccenv help'"; exit 1 ;;
   esac
 }
 

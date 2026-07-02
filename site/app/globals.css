@@ -1,0 +1,557 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/*
+  ccenv — "engineering print" system
+  Reference: a 1960s Swiss product manual / Vignelli spec sheet printed on
+  warm uncoated stock, one committed vermilion spot ink. Real terminal output
+  is set as dark inked plates with hard-offset shadows, like pasted prints.
+*/
+
+/* ── Tokens ──────────────────────────────────────────────── */
+:root {
+  --paper: oklch(0.958 0.015 83);        /* warm cream field */
+  --paper-raise: oklch(0.978 0.009 83);  /* lifted inset */
+  --paper-sink: oklch(0.93 0.017 82);    /* recessed band */
+
+  --ink: oklch(0.235 0.021 55);          /* warm near-black text */
+  --ink-2: oklch(0.42 0.022 58);         /* muted body */
+  --ink-3: oklch(0.6 0.018 62);          /* faint metadata */
+
+  --spot: oklch(0.585 0.204 34);         /* vermilion spot ink — the voice */
+  --spot-2: oklch(0.5 0.185 34);         /* pressed / hover */
+
+  --line: color-mix(in oklab, var(--ink) 16%, transparent);
+  --line-strong: color-mix(in oklab, var(--ink) 34%, transparent);
+
+  --term: oklch(0.205 0.017 58);         /* dark inked plate */
+  --term-fg: oklch(0.9 0.016 83);        /* warm light on plate */
+  --term-dim: oklch(0.63 0.014 78);      /* plate comments */
+
+  --shadow-plate: 7px 7px 0 var(--ink);
+  --shadow-spot: 7px 7px 0 var(--spot);
+
+  --background: var(--paper);
+  --foreground: var(--ink);
+  --radius: 0px;
+
+  --font-display-family: var(--font-display), "Arial Black", system-ui, sans-serif;
+  --font-sans-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono-family: var(--font-mono), ui-monospace, "SF Mono", Menlo, monospace;
+
+  --measure: 72rem;
+  --gutter: clamp(1.25rem, 5vw, 4rem);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-paper: var(--paper);
+  --color-ink: var(--ink);
+  --color-spot: var(--spot);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+/* ── Base ────────────────────────────────────────────────── */
+@layer base {
+  * {
+    border-color: var(--line);
+    outline-color: color-mix(in oklab, var(--spot) 55%, transparent);
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+    font-family: var(--font-sans-family);
+    background: var(--paper);
+  }
+
+  body {
+    background-color: var(--paper);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-synthesis-weight: none;
+    text-rendering: optimizeLegibility;
+    font-family: var(--font-sans-family);
+    overflow-x: clip;
+  }
+
+  ::selection {
+    background-color: color-mix(in oklab, var(--spot) 26%, transparent);
+    color: var(--ink);
+  }
+
+  code {
+    font-family: var(--font-mono-family);
+    font-size: 0.86em;
+    color: var(--spot-2);
+    background: color-mix(in oklab, var(--spot) 11%, transparent);
+    padding: 0.05em 0.34em;
+    border-radius: 2px;
+  }
+
+  @media (any-pointer: fine) {
+    html, body, *, a, button, select, input, textarea, [role="button"] {
+      cursor: none !important;
+    }
+  }
+}
+
+/* ── Layout primitives ───────────────────────────────────── */
+.wrap {
+  width: 100%;
+  max-width: var(--measure);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.sheet {
+  position: relative;
+  border-top: 2px solid var(--ink);
+  padding-block: clamp(4.5rem, 9vw, 8rem);
+}
+
+.sheet[id] {
+  scroll-margin-top: 5rem;
+}
+
+.sheet--hero {
+  border-top: none;
+  padding-block: clamp(3rem, 6vw, 5.5rem) clamp(4.5rem, 9vw, 7rem);
+}
+
+.sheet--sink {
+  background: var(--paper-sink);
+}
+
+/* Section head: big vermilion plate index + title, catalog grammar */
+.sheet-head {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  column-gap: clamp(1rem, 3vw, 2.5rem);
+  margin-bottom: clamp(2rem, 4vw, 3.25rem);
+}
+
+.index {
+  font-family: var(--font-display-family);
+  font-weight: 800;
+  font-size: clamp(1.6rem, 3vw, 2.4rem);
+  line-height: 0.9;
+  letter-spacing: -0.03em;
+  color: var(--spot);
+  font-variant-numeric: tabular-nums;
+}
+
+.kicker {
+  font-family: var(--font-mono-family);
+  font-size: 0.72rem;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--spot);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6em;
+}
+
+.kicker::before {
+  content: "";
+  width: 1.6em;
+  height: 2px;
+  background: var(--spot);
+}
+
+/* ── Type ────────────────────────────────────────────────── */
+.headline {
+  font-family: var(--font-display-family);
+  font-weight: 700;
+  font-size: clamp(2.9rem, 8.5vw, 6.4rem);
+  line-height: 0.94;
+  letter-spacing: -0.035em;
+  color: var(--ink);
+  text-wrap: balance;
+  margin: 0;
+}
+
+.headline .mark {
+  color: var(--spot);
+}
+
+.title {
+  font-family: var(--font-display-family);
+  font-weight: 700;
+  font-size: clamp(1.9rem, 4vw, 3rem);
+  line-height: 1.02;
+  letter-spacing: -0.028em;
+  color: var(--ink);
+  margin: 0;
+  text-wrap: balance;
+}
+
+.lede {
+  font-family: var(--font-sans-family);
+  font-size: clamp(1.1rem, 1.5vw, 1.35rem);
+  line-height: 1.5;
+  color: var(--ink-2);
+  max-width: 44ch;
+  margin: 0;
+}
+
+.body {
+  font-family: var(--font-sans-family);
+  font-size: 1.05rem;
+  line-height: 1.62;
+  color: var(--ink-2);
+  max-width: 62ch;
+  margin: 0;
+}
+
+.mono {
+  font-family: var(--font-mono-family);
+}
+
+/* ── Masthead ────────────────────────────────────────────── */
+.masthead {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: color-mix(in oklab, var(--paper) 88%, transparent);
+  backdrop-filter: blur(8px) saturate(1.1);
+  -webkit-backdrop-filter: blur(8px) saturate(1.1);
+  border-bottom: 2px solid var(--ink);
+}
+
+.masthead__inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 60px;
+}
+
+.masthead__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-family: var(--font-display-family);
+  font-weight: 800;
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.masthead__brand::before {
+  content: "";
+  width: 0.85rem;
+  height: 0.85rem;
+  background: var(--spot);
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+.masthead__nav {
+  display: none;
+  gap: clamp(1.25rem, 3vw, 2.25rem);
+  font-family: var(--font-mono-family);
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+@media (min-width: 48rem) {
+  .masthead__nav { display: flex; align-items: center; }
+}
+
+.masthead__nav a {
+  color: var(--ink-2);
+  text-decoration: none;
+  padding-block: 0.35rem;
+  border-bottom: 2px solid transparent;
+  transition: color 0.18s ease, border-color 0.18s ease;
+}
+
+.masthead__nav a:hover {
+  color: var(--ink);
+  border-bottom-color: var(--spot);
+}
+
+.masthead__cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-mono-family);
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--paper);
+  background: var(--ink);
+  text-decoration: none;
+  padding: 0.5rem 0.9rem;
+  transition: background 0.18s ease, gap 0.18s ease;
+}
+
+.masthead__cta:hover { background: var(--spot); gap: 0.8rem; }
+
+/* ── Plates (offset-shadow panels) ───────────────────────── */
+.plate {
+  position: relative;
+  border: 2px solid var(--ink);
+  background: var(--term);
+  box-shadow: var(--shadow-plate);
+}
+
+.plate--spot { box-shadow: var(--shadow-spot); }
+
+.plate__cap {
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  transform: translateY(-100%);
+  font-family: var(--font-mono-family);
+  font-size: 0.66rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--spot);
+  padding-bottom: 0.4rem;
+}
+
+/* ── Commands spec sheet ─────────────────────────────────── */
+.spec {
+  width: 100%;
+  border-collapse: collapse;
+  border-top: 2px solid var(--ink);
+}
+
+.spec tr { border-bottom: 1px solid var(--line); }
+.spec tr:last-child { border-bottom: 2px solid var(--ink); }
+
+.spec td {
+  padding: 0.95rem 1rem 0.95rem 0;
+  vertical-align: baseline;
+}
+
+.spec__cmd {
+  font-family: var(--font-mono-family);
+  font-size: 0.92rem;
+  white-space: nowrap;
+  padding-right: clamp(1rem, 4vw, 3rem);
+}
+
+.spec__bin { color: var(--ink-3); }
+.spec__sub { color: var(--spot-2); font-weight: 600; }
+.spec__arg { color: var(--ink); }
+
+.spec__desc {
+  font-family: var(--font-sans-family);
+  font-size: 0.98rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+  width: 62%;
+}
+
+/* ── Guards (security) ───────────────────────────────────── */
+.guard {
+  border-top: 2px solid var(--ink);
+  padding-top: 1.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.guard__stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-mono-family);
+  font-size: 0.66rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.guard__ok {
+  color: var(--paper);
+  background: var(--spot);
+  padding: 0.1rem 0.4rem;
+  font-weight: 600;
+}
+
+.guard__title {
+  font-family: var(--font-display-family);
+  font-weight: 700;
+  font-size: 1.3rem;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--ink);
+  margin: 0;
+}
+
+.guard__body {
+  font-family: var(--font-sans-family);
+  font-size: 0.98rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+  margin: 0;
+}
+
+/* ── Numbered mechanism list ─────────────────────────────── */
+.step {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1.25rem;
+  align-items: start;
+  padding-block: 1.4rem;
+  border-top: 1px solid var(--line);
+}
+
+.step__num {
+  font-family: var(--font-mono-family);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--spot);
+  border: 2px solid var(--ink);
+  background: var(--paper-raise);
+  padding: 0.3rem 0.55rem;
+  line-height: 1;
+  min-width: 2.4rem;
+  text-align: center;
+}
+
+.step__body {
+  font-family: var(--font-sans-family);
+  font-size: 1.05rem;
+  line-height: 1.58;
+  color: var(--ink-2);
+  margin: 0;
+}
+
+/* ── CTA bar ─────────────────────────────────────────────── */
+.cta-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.85rem;
+  font-family: var(--font-mono-family);
+  font-size: 0.95rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--paper);
+  background: var(--spot);
+  text-decoration: none;
+  padding: 1.05rem 2rem;
+  border: 2px solid var(--spot);
+  box-shadow: 6px 6px 0 var(--ink);
+  transition: transform 0.18s cubic-bezier(0.22,1,0.36,1),
+              box-shadow 0.18s cubic-bezier(0.22,1,0.36,1);
+}
+
+.cta-bar:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: 9px 9px 0 var(--ink);
+}
+
+.cta-bar:active {
+  transform: translate(3px, 3px);
+  box-shadow: 3px 3px 0 var(--ink);
+}
+
+.cta-alt {
+  font-family: var(--font-mono-family);
+  font-size: 0.74rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  transition: color 0.18s ease, border-color 0.18s ease;
+}
+
+.cta-alt:hover { color: var(--ink); border-bottom-color: var(--spot); }
+
+/* ── Install line ────────────────────────────────────────── */
+.installer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border: 2px solid var(--ink);
+  background: var(--term);
+  box-shadow: var(--shadow-plate);
+  padding: 0.35rem 0.35rem 0.35rem 1.15rem;
+}
+
+.installer pre {
+  overflow-x: auto;
+  font-family: var(--font-mono-family);
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: var(--term-fg);
+}
+
+.installer .sigil { user-select: none; color: var(--term-dim); }
+
+/* ── Footer ──────────────────────────────────────────────── */
+.colophon {
+  border-top: 2px solid var(--ink);
+  background: var(--paper-sink);
+}
+
+.colophon__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-block: 1.75rem;
+  font-family: var(--font-mono-family);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.colophon__row a {
+  color: var(--ink-2);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  padding-bottom: 2px;
+  transition: color 0.18s ease, border-color 0.18s ease;
+}
+
+.colophon__row a:hover { color: var(--ink); border-bottom-color: var(--spot); }
+
+.colophon__brand { color: var(--ink); font-weight: 700; }
+
+.colophon__mark {
+  overflow: hidden;
+  padding-bottom: 1.5rem;
+}
+
+.colophon__mark svg {
+  width: 100%;
+  height: auto;
+  color: color-mix(in oklab, var(--ink) 12%, transparent);
+}
+
+/* ── Scroll reveal ───────────────────────────────────────── */
+[data-reveal] {
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+[data-reveal].is-revealed {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-reveal] {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+  html { scroll-behavior: auto; }
+}
