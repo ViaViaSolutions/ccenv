@@ -364,17 +364,10 @@
   align-items: center;
   gap: 0.5rem;
   font-family: var(--font-mono-family);
-  font-size: 0.66rem;
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-}
-
-.guard__ok {
-  color: var(--paper);
-  background: var(--spot);
-  padding: 0.1rem 0.4rem;
+  font-size: 0.72rem;
   font-weight: 600;
+  letter-spacing: 0.16em;
+  color: var(--spot);
 }
 
 .guard__title {
@@ -409,15 +402,17 @@
   font-family: var(--font-mono-family);
   font-size: 0.8rem;
   font-weight: 600;
-  letter-spacing: 0.1em;
+  letter-spacing: 0;
   text-transform: uppercase;
   color: var(--spot);
   border: 2px solid var(--ink);
   background: var(--paper-raise);
-  padding: 0.3rem 0.55rem;
+  padding-block: 0.35rem;
   line-height: 1;
-  min-width: 2.4rem;
+  width: 2.9rem;
+  box-sizing: border-box;
   text-align: center;
+  flex: none;
 }
 
 .step__body {
@@ -522,6 +517,25 @@
 .colophon__row a:hover { color: var(--ink); border-bottom-color: var(--spot); }
 
 .colophon__brand { color: var(--ink); font-weight: 700; }
+
+.colophon__made {
+  font-family: var(--font-mono-family);
+  font-size: 0.72rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  text-align: center;
+  padding-top: 1.75rem;
+  padding-bottom: 0.25rem;
+  border-top: 1px solid var(--line);
+}
+
+.colophon__made .heart {
+  color: var(--spot);
+  margin-left: 0.3em;
+  font-size: 1.05em;
+  vertical-align: -0.05em;
+}
 
 .colophon__mark {
   overflow: hidden;

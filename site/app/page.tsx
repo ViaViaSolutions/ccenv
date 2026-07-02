@@ -104,7 +104,7 @@ export default function Home() {
             <p className="kicker mb-8">A field tool for Claude Code</p>
             <h1 className="headline" style={{ maxWidth: "16ch" }}>
               One account per terminal, switched with{" "}
-              <span className="mark">a keystroke.</span>
+              a keystroke
             </h1>
             <p className="lede mt-8">
               Personal in one terminal, work in another, a client in a third, all
@@ -120,9 +120,6 @@ export default function Home() {
                   <path d="M3 8 L13 8" />
                   <path d="M9 4 L13 8 L9 12" />
                 </svg>
-              </a>
-              <a className="cta-alt" href={GITHUB_URL} target="_blank" rel="noopener">
-                Read the source →
               </a>
             </div>
 
@@ -268,7 +265,7 @@ export default function Home() {
               </tbody>
             </table>
 
-            <p className="body mt-6" style={{ fontSize: "0.95rem", color: "var(--ink-3)" }}>
+            <p className="body mt-6" style={{ fontSize: "0.95rem", color: "var(--ink-3)", maxWidth: "none" }}>
               <code>use</code> and <code>unuse</code> run through the shell
               integration the installer adds to your rc; open a new terminal (or
               re-source it) once after installing. <code>ccenv help full</code>{" "}
@@ -290,7 +287,6 @@ export default function Home() {
                 <div key={claim} className="guard">
                   <div className="guard__stamp">
                     <span>{(idx + 1).toString().padStart(2, "0")}</span>
-                    <span className="guard__ok">OK</span>
                   </div>
                   <h3 className="guard__title">{claim}</h3>
                   <p className="guard__body">{detail}</p>
@@ -347,10 +343,17 @@ export default function Home() {
           </div>
           <nav className="flex flex-wrap items-center gap-6" aria-label="Footer">
             <a href={GITHUB_URL} target="_blank" rel="noopener">GitHub</a>
-            <a href="https://github.com/westdabestdb/ccenv/issues">Issues</a>
-            <span aria-hidden style={{ color: "var(--ink-3)" }}>© 2026</span>
+
+
+            <span aria-hidden style={{ color: "var(--ink-3)" }}>© {new Date().getFullYear()}</span>
           </nav>
         </div>
+        
+        <p className="colophon__made wrap">
+          Made on Earth with <span className="heart" aria-hidden>♥</span>
+          <span className="sr-only">love</span>
+        </p>
+
         <div className="colophon__mark wrap" aria-hidden>
           <svg viewBox="0 0 1200 200" preserveAspectRatio="xMidYMid meet">
             <text
