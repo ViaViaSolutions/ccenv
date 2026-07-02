@@ -3,7 +3,7 @@ import { Comment, Prompt, Terminal } from "@/components/terminal";
 import { ScrollReveal } from "@/components/scroll-reveal";
 import { CustomCursor } from "@/components/custom-cursor";
 
-const GITHUB_URL = "https://github.com/westdabestdb/ccenv";
+const GITHUB_URL = "https://github.com/ViaViaTravel/ccenv";
 const INSTALL_CMD = "curl -fsSL https://ccenv.dev/install.sh | bash";
 
 const COMMANDS = [

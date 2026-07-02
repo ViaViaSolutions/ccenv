@@ -46,7 +46,7 @@ shell snippet from `ccenv.dev` and installs them per-user (no sudo). Needs
 <summary>From a clone instead</summary>
 
 ```sh
-git clone https://github.com/westdabestdb/ccenv ccenv && cd ccenv
+git clone https://github.com/ViaViaTravel/ccenv ccenv && cd ccenv
 ./install.sh
 ```
 

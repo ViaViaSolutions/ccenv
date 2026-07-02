@@ -7,10 +7,18 @@
 #   CCENV_BIN_DIR=/usr/local/bin ./install.sh         # force the bin dir
 set -uo pipefail
 
-REPO="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P || true)"
+# Where does THIS script physically live? Only treat it as a clone install when
+# the script itself is a real file on disk (next to bin/ccenv). Run as
+# `curl … | bash` the script comes from stdin and has no path, so REPO stays
+# empty and we take the web-download path — we never infer a repo from the
+# current directory, which might just happen to contain a bin/ccenv (e.g. when
+# you pipe the installer while sitting inside the cloned repo).
+SELF="${BASH_SOURCE[0]:-$0}"
+REPO=""
+[ -f "$SELF" ] && REPO="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd -P || true)"
 BASE_URL="${CCENV_BASE_URL:-https://ccenv.dev}"
-BIN_SRC="$REPO/bin/ccenv"
-SHELL_SRC="$REPO/shell/ccenv.sh"
+BIN_SRC="${REPO:+$REPO/bin/ccenv}"
+SHELL_SRC="${REPO:+$REPO/shell/ccenv.sh}"
 WEB_INSTALL=0
 
 B=$'\033[1m'; G=$'\033[32m'; Y=$'\033[33m'; C=$'\033[36m'; D=$'\033[2m'; X=$'\033[0m'
