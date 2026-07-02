@@ -169,10 +169,11 @@ ccenv update           # fetch the latest build and swap it in
 ccenv update --check   # just report the available version
 ```
 
-A **web install** downloads the newest `ccenv` from `ccenv.dev`, verifies it, and
+`update` always fetches the newest `ccenv` from `ccenv.dev`, verifies it, and
 atomically replaces the running binary (safe — rename swaps the directory entry,
-not the inode the process is reading). A **clone install** is updated with
-`git pull` instead. Override the origin with `CCENV_BASE_URL`.
+not the inode the process is reading). For a clone install the PATH symlink is
+replaced with the downloaded copy; your repo working tree is left untouched.
+Override the origin with `CCENV_BASE_URL` (handy for testing a preview deploy).
 
 ## Uninstall
 

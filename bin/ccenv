@@ -526,8 +526,10 @@ self_path() {
 version_of() { grep -m1 'CCENV_VERSION=' "$1" 2>/dev/null | sed -E 's/.*CCENV_VERSION="?([^"]*)"?.*/\1/'; }
 
 # Update ccenv in place to the latest build published at CCENV_BASE_URL.
-#   - copy/web install (a real file): download, verify, atomically swap it in.
-#   - clone install (symlink into a git repo): `git pull` the repo instead.
+# ALWAYS fetches from the hosted build (ccenv.dev by default), for every install
+# type. A clone install's PATH entry is a symlink into the repo; we replace that
+# symlink with the downloaded copy — the repo working tree is left untouched, and
+# the running process keeps reading its own inode, so self-replacement is safe.
 cmd_update() {
   local base="${CCENV_BASE_URL:-https://ccenv.dev}" force=0 check=0
   while [ $# -gt 0 ]; do
@@ -540,29 +542,12 @@ cmd_update() {
   done
 
   local self; self="$(self_path)" || die "cannot locate the running ccenv binary to update"
-
-  # Clone install: the PATH entry is a symlink into a git working tree. Updating
-  # by overwriting would fight git, so pull instead.
-  if [ -L "$self" ]; then
-    local tgt; tgt="$(readlink "$self")"
-    case "$tgt" in /*) : ;; *) tgt="$(cd "$(dirname "$self")" && cd "$(dirname "$tgt")" 2>/dev/null && pwd -P)/$(basename "$tgt")" ;; esac
-    local repo; repo="$(cd "$(dirname "$tgt")/.." 2>/dev/null && pwd -P || true)"
-    if [ -n "$repo" ] && [ -d "$repo/.git" ]; then
-      info "ccenv is a clone install at ${repo/#$HOME/~}"
-      [ "$check" -eq 1 ] && { info "  ${D}update with: git -C ${repo/#$HOME/~} pull${X}"; return 0; }
-      command -v git >/dev/null 2>&1 || die "git not found — update manually: git -C $repo pull && $repo/install.sh"
-      ( cd "$repo" && git pull --ff-only ) || die "git pull failed in $repo"
-      ok "updated via git pull  ${D}(re-run $repo/install.sh if the shell snippet changed)${X}"
-      return 0
-    fi
-    # symlink to somewhere that isn't a git repo → fall through and replace it.
-  fi
-
-  # Copy/web install: fetch the latest binary into a temp file NEXT TO the target
-  # (so the final rename is atomic and stays on the same filesystem).
   local dir; dir="$(dirname "$self")"
   [ -w "$dir" ] || die "cannot update: $dir is not writable (re-run the installer, or use sudo)"
+  local was_link=0; [ -L "$self" ] && was_link=1
 
+  # Fetch the latest binary into a temp file NEXT TO the target so the final
+  # rename is atomic and stays on the same filesystem.
   local tmp; tmp="$(mktemp "$self.ccenv-update.XXXXXX")" || die "cannot create temp file in $dir"
   # No EXIT trap: $tmp is function-local and would be unbound (set -u) when the
   # trap fired at process exit. Clean up explicitly on every path instead.
@@ -585,8 +570,10 @@ cmd_update() {
   local perm; perm="$(file_mode "$self")"; [ -n "$perm" ] && chmod "$perm" "$tmp" 2>/dev/null
   chmod +x "$tmp" 2>/dev/null || true
   # Atomic swap: rename replaces the directory entry with a NEW inode; the
-  # currently-running process keeps reading the old inode, so this is safe.
+  # currently-running process keeps reading the old inode, so this is safe. If
+  # $self was a clone symlink, this replaces the link with the downloaded copy.
   mv "$tmp" "$self" || { rm -f "$tmp"; die "could not replace $self"; }
+  [ "$was_link" -eq 1 ] && info "  ${D}was a clone symlink → now a standalone copy from ${base#https://} (repo left untouched)${X}"
 
   # Best-effort refresh of the installed shell snippet too (harmless if absent).
   if [ -f "$CCENV_HOME/shell/ccenv.sh" ]; then
@@ -801,8 +788,9 @@ ${B}REMOVE OPTIONS${X}
                              is keyed by the profile's path).
 
 ${B}UPDATE OPTIONS${X}
-  ccenv update               Fetch the latest build and swap it in atomically.
-                             A clone install is updated with 'git pull' instead.
+  ccenv update               Fetch the latest build from ccenv.dev and swap it in
+                             atomically. A clone install's symlink is replaced with
+                             the downloaded copy (the repo is left untouched).
   --check                    Report the available version without changing anything
   --force                    Reinstall even if already on the latest version
                              (origin: CCENV_BASE_URL, default https://ccenv.dev)
