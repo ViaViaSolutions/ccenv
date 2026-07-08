@@ -93,6 +93,20 @@ ccenv run work -- -p "summarize this repo"  # pass args straight through
 `ccenv use` changes only the current shell; `ccenv run` only that one
 session. Either way the accounts never interfere.
 
+### Tired of typing `use` every time?
+
+Pick a standing default and every **new** shell starts on it:
+
+```sh
+ccenv default work     # new terminals auto-use 'work' (also switches this shell)
+ccenv default          # show the current default
+ccenv default --clear  # back to your personal account for new shells
+```
+
+An explicit `ccenv use <name>` / `ccenv unuse` still overrides it in that one
+shell, and subshells inherit whatever the parent picked. The choice is saved as
+a plain profile name in `~/.ccenv/default` (no secrets).
+
 ## Commands
 
 | Command | What it does |
@@ -100,6 +114,7 @@ session. Either way the accounts never interfere.
 | `list` / `ls` | Accounts + sign-in status (● = active in this shell) |
 | `use <name>` | Point the current shell at a profile |
 | `unuse` | Revert this shell to `default` |
+| `default [name]` | Auto-use `<name>` in every new shell (`--clear` to reset) |
 | `run <name> [-- args]` | Launch a `claude` session as `<name>` |
 | `current` | Show this shell's active profile |
 | `create <name> [opts]` | New profile, then login |

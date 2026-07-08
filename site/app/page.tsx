@@ -8,6 +8,7 @@ const INSTALL_CMD = "curl -fsSL https://ccenv.dev/install.sh | bash";
 
 const COMMANDS = [
   { bin: "ccenv", sub: "use", args: "<name>", desc: "Rebind the current shell to an account (needs shell integration)." },
+  { bin: "ccenv", sub: "default", args: "[name]", desc: "Auto-use an account in every new shell; --clear resets it." },
   { bin: "ccenv", sub: "run", args: "<name>", desc: "Launch a one-off session on an account." },
   { bin: "ccenv", sub: "list", args: "", desc: "Show every profile; ● marks the active shell." },
   { bin: "ccenv", sub: "current", args: "", desc: "Print the account this shell is on." },

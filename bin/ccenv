@@ -20,7 +20,7 @@
 # Usage: ccenv help
 set -uo pipefail
 
-CCENV_VERSION="1.4.0"
+CCENV_VERSION="1.5.0"
 
 # ---- paths -------------------------------------------------------------------
 CCENV_HOME="${CCENV_HOME:-$HOME/.ccenv}"
@@ -45,6 +45,11 @@ fi
 
 PROFILES_DIR="$CCENV_HOME/profiles"
 BASE_CONFIG="${CCENV_BASE_CONFIG:-$HOME/.claude}"
+
+# Standing default profile: the name in this file is auto-applied by the shell
+# integration to every new shell that hasn't already picked a profile. Name
+# only — no secrets. Kept inside the path-guarded CCENV_HOME.
+DEFAULT_FILE="$CCENV_HOME/default"
 
 # How a new profile inherits your environment:
 #
@@ -128,6 +133,23 @@ list_profiles() {
   if [ -d "$PROFILES_DIR" ]; then
     find "$PROFILES_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort
   fi
+}
+
+# Print the standing default profile name (empty if none set). Reads only the
+# first line and strips whitespace so a hand-edited file can't inject noise.
+read_default() {
+  [ -f "$DEFAULT_FILE" ] || return 0
+  head -n1 "$DEFAULT_FILE" 2>/dev/null | tr -d '[:space:]'
+}
+
+# Atomically persist a validated profile name as the standing default.
+write_default() {
+  local name="$1" tmp
+  mkdir -p "$CCENV_HOME" 2>/dev/null || true
+  tmp="$(mktemp "$DEFAULT_FILE.XXXXXX")" || return 1
+  printf '%s\n' "$name" > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$DEFAULT_FILE" || { rm -f "$tmp"; return 1; }
 }
 
 # Run `claude auth status --json` for a config dir (empty = default/ambient-unset).
@@ -358,6 +380,44 @@ cmd_current() {
   printf '%s●%s %s%s%s\n' "$C" "$X" "$B" "${CCENV_PROFILE:-default}" "$X"
 }
 
+# Get/set/clear the standing default profile (auto-applied to new shells).
+#   ccenv default            → show the current default
+#   ccenv default <name>     → set it (profile must exist)
+#   ccenv default --clear    → remove it
+cmd_set_default() {
+  local arg="${1:-}"
+  case "$arg" in
+    "")
+      local cur; cur="$(read_default)"
+      if [ -z "$cur" ]; then
+        info "${D}no default set${X} — new shells start as ${B}default${X} (~/.claude)"
+      else
+        info "default profile: ${B}$cur${X}"
+        [ -z "${CCENV_SHELL_LOADED:-}" ] && warn "shell integration not loaded — it won't auto-apply (run: ccenv doctor)"
+      fi
+      return 0 ;;
+    --clear|clear|none|off)
+      if [ -f "$DEFAULT_FILE" ]; then
+        rm -f "$DEFAULT_FILE" && ok "cleared default — new shells start as ${B}default${X}"
+      else
+        info "${D}no default set${X}"
+      fi
+      return 0 ;;
+    -*)
+      die "unknown option: $arg  (usage: ccenv default [<name>|--clear])" ;;
+  esac
+
+  # Setting a default: the profile must resolve (default/main allowed).
+  resolve_dir "$arg" >/dev/null || exit 1
+  write_default "$arg" || die "could not write $DEFAULT_FILE"
+  ok "default profile set to ${B}$arg${X}"
+  if [ -n "${CCENV_SHELL_LOADED:-}" ]; then
+    info "  ${D}new shells start as $arg; this shell updates now${X}"
+  else
+    info "  ${D}new shells start as $arg once shell integration is loaded (ccenv doctor)${X}"
+  fi
+}
+
 cmd_remove() {
   local name="" keep=0 yes=0
   while [ $# -gt 0 ]; do
@@ -404,6 +464,11 @@ cmd_remove() {
   fi
   rm -rf "$real"
   ok "removed profile $name"
+
+  # Drop a dangling default so new shells don't try to resolve a gone profile.
+  if [ "$(read_default)" = "$name" ]; then
+    rm -f "$DEFAULT_FILE" && info "  ${D}was the default — cleared it${X}"
+  fi
 }
 
 cmd_rename() {
@@ -416,6 +481,10 @@ cmd_rename() {
   [ -d "$od" ] || die "no such profile: $old"
   [ -e "$nd" ] && die "target already exists: $new"
   mv "$od" "$nd"
+  # Follow the rename so a standing default keeps pointing at the same profile.
+  if [ "$(read_default)" = "$old" ]; then
+    write_default "$new" && info "  ${D}default updated: $old → $new${X}"
+  fi
   ok "renamed $old → $new  ${D}(re-login needed: ccenv login $new)${X}"
 }
 
@@ -503,6 +572,16 @@ cmd_doctor() {
       done
     fi
   done < <(list_profiles)
+
+  # standing default: report it, and flag it if it points at a gone profile.
+  local def; def="$(read_default)"
+  if [ -n "$def" ]; then
+    if resolve_dir "$def" >/dev/null 2>&1; then
+      ok "default profile: $def (new shells auto-use it)"
+    else
+      err "default profile '$def' no longer exists — clear it: ccenv default --clear"; problems=$((problems+1))
+    fi
+  fi
 
   info ""
   if [ "$problems" -eq 0 ]; then ok "all good"; else err "$problems issue(s) found"; fi
@@ -730,6 +809,14 @@ ccenv() {
       unset CLAUDE_CONFIG_DIR CCENV_PROFILE
       command ccenv current
       ;;
+    default|set-default|setdefault)
+      command ccenv "$@" || return $?
+      # Setting a default also switches THIS shell now (skip show/clear forms).
+      case "${2:-}" in
+        ""|--clear|clear|none|off|-*) : ;;
+        *) ccenv use "$2" ;;
+      esac
+      ;;
     uninstall)
       command ccenv "$@"
       local __rc=$?
@@ -745,6 +832,18 @@ ccenv() {
   esac
 }
 export CCENV_SHELL_LOADED=1
+
+# Auto-apply the standing default (ccenv default <name>) to this shell when it
+# hasn't already picked a profile. The CCENV_PROFILE guard means subshells and
+# an explicit `ccenv use`/`unuse` always win over the default.
+if [ -z "${CCENV_PROFILE:-}" ] && [ -r "${CCENV_HOME:-$HOME/.ccenv}/default" ]; then
+  __ccenv_def="$(cat "${CCENV_HOME:-$HOME/.ccenv}/default" 2>/dev/null | head -n1 | tr -d '[:space:]')"
+  if [ -n "$__ccenv_def" ] && __ccenv_dir="$(command ccenv resolve "$__ccenv_def" 2>/dev/null)"; then
+    [ -n "$__ccenv_dir" ] && export CLAUDE_CONFIG_DIR="$__ccenv_dir"
+    export CCENV_PROFILE="$__ccenv_def"
+  fi
+  unset __ccenv_def __ccenv_dir
+fi
 SNIPPET
 }
 
@@ -755,6 +854,7 @@ ${B}ccenv${X} ${D}v${CCENV_VERSION}${X} — run multiple Claude Code accounts
 
   ${C}list${X}                     accounts + who's signed in
   ${C}use${X} <name> / ${C}unuse${X}       switch this shell  ${D}(needs integration)${X}
+  ${C}default${X} [name]           auto-use <name> in every new shell
   ${C}run${X} <name> [-- args]     launch claude as <name>
   ${C}create${X} <name>            add an account, then sign in
   ${C}login${X} / ${C}logout${X} <name>    sign in / out
@@ -802,6 +902,14 @@ ${B}UNINSTALL OPTIONS${X}
   -y, --yes                  Don't prompt for confirmation
                              (repo fallback: ./uninstall.sh [--purge])
 
+${B}DEFAULT PROFILE${X}
+  ccenv default <name>       Auto-use <name> in every NEW shell (saved to
+                             ${DEFAULT_FILE/#$HOME/~}). No more 'ccenv use' each terminal.
+  ccenv default             Show the current default
+  ccenv default --clear      Back to 'default' (~/.claude) for new shells
+                             An explicit 'ccenv use'/'unuse' still overrides it
+                             per-shell; subshells inherit the parent's choice.
+
 ${B}SHARED vs PER-PROFILE${X}
   Symlinked (shared):   plugins, skills, commands, hooks, CLAUDE.md
   Copied per profile:   settings.json, settings.local.json, mcp_config.json
@@ -829,6 +937,7 @@ main() {
     run|launch|exec)    cmd_run "$@" ;;
     use|unuse)          die "'$cmd' needs shell integration → restart your shell or re-source your rc (or: ccenv shell-init)" ;;
     current|active)     cmd_current "$@" ;;
+    default|set-default|setdefault) cmd_set_default "$@" ;;
     status|st)          cmd_status "$@" ;;
     sync)               cmd_sync "$@" ;;
     remove|rm|delete)   cmd_remove "$@" ;;

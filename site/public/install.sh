@@ -205,3 +205,4 @@ printf 'Then:\n'
 printf '  %sccenv list%s            your current account shows as "default"\n' "$C" "$X"
 printf '  %sccenv create work%s     add another account\n' "$C" "$X"
 printf '  %sccenv use work%s        point this shell at it\n' "$C" "$X"
+printf '  %sccenv default work%s    …or auto-use it in every new shell\n' "$C" "$X"
