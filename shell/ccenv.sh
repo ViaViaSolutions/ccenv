@@ -7,9 +7,10 @@
 # Every other subcommand is forwarded to the real `ccenv` binary on PATH.
 
 # Apply the pin/default that governs $PWD to THIS shell — unless an explicit
-# `ccenv use` is in effect (CCENV_PROFILE set WITHOUT CCENV_AUTO). Used both at
-# shell startup and right after `ccenv pin`/`unpin`, so a pin takes effect
-# immediately, not only in new terminals. Auto-applied profiles are tagged
+# `ccenv use` is in effect (CCENV_PROFILE set WITHOUT CCENV_AUTO). Runs at shell
+# startup, on every `cd` (chpwd/PROMPT_COMMAND hook below), and right after
+# `ccenv pin`/`unpin`, so a pin takes effect immediately — both in new terminals
+# and when you cd into a pinned dir mid-session. Auto-applied profiles are tagged
 # CCENV_AUTO=1 so they re-resolve per-directory instead of leaking through an
 # inherited environment (a new tab / editor terminal / tmux pane). Cheap when
 # nothing is configured: only spawns `ccenv resolve-auto` if a default or pins
@@ -80,6 +81,16 @@ ccenv() {
         0) : ;;
         *) return "$__rc" ;;
       esac
+      # Tear down the directory-change hook before dropping the functions it calls,
+      # or the next `cd`/prompt would fire a now-undefined function.
+      if [ -n "${ZSH_VERSION:-}" ]; then
+        autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook -d chpwd __ccenv_autoapply 2>/dev/null
+      elif [ -n "${BASH_VERSION:-}" ]; then
+        PROMPT_COMMAND="${PROMPT_COMMAND//__ccenv_pwd_hook;/}"
+        PROMPT_COMMAND="${PROMPT_COMMAND//__ccenv_pwd_hook/}"
+        unset -f __ccenv_pwd_hook 2>/dev/null
+        unset __CCENV_LAST_PWD
+      fi
       unset CLAUDE_CONFIG_DIR CCENV_PROFILE CCENV_AUTO CCENV_SHELL_LOADED
       unset -f ccenv __ccenv_autoapply
       ;;
@@ -90,6 +101,24 @@ ccenv() {
 }
 
 export CCENV_SHELL_LOADED=1
+
+# Re-apply on directory change: a pin must take effect when you `cd` INTO a
+# pinned directory, not only when a shell STARTS there. Without this, a new
+# terminal opens in $HOME, resolves nothing, and a later `cd` into the pinned
+# dir is never noticed. zsh fires chpwd on every cd; bash has no native
+# equivalent, so we guard a PROMPT_COMMAND entry on $PWD actually changing.
+if [ -n "${ZSH_VERSION:-}" ]; then
+  autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook chpwd __ccenv_autoapply
+elif [ -n "${BASH_VERSION:-}" ]; then
+  __ccenv_pwd_hook() {
+    [ "${__CCENV_LAST_PWD:-}" = "$PWD" ] && return 0
+    __CCENV_LAST_PWD="$PWD"; __ccenv_autoapply
+  }
+  case "${PROMPT_COMMAND:-}" in
+    *__ccenv_pwd_hook*) : ;;
+    *) PROMPT_COMMAND="__ccenv_pwd_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
+  esac
+fi
 
 # Auto-apply the pin/default for this shell's starting directory. Re-resolves
 # when the shell has no profile yet, or when an inherited profile was itself
