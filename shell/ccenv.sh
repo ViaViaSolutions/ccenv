@@ -56,15 +56,20 @@ ccenv() {
 
 export CCENV_SHELL_LOADED=1
 
-# Auto-apply the standing default (`ccenv default <name>`) to this shell when it
-# hasn't already picked a profile. The CCENV_PROFILE guard means subshells and
-# an explicit `ccenv use`/`unuse` always win over the default. One `ccenv
-# resolve` spawn per new shell, only when a default is set.
-if [ -z "${CCENV_PROFILE:-}" ] && [ -r "${CCENV_HOME:-$HOME/.ccenv}/default" ]; then
-  __ccenv_def="$(cat "${CCENV_HOME:-$HOME/.ccenv}/default" 2>/dev/null | head -n1 | tr -d '[:space:]')"
-  if [ -n "$__ccenv_def" ] && __ccenv_dir="$(command ccenv resolve "$__ccenv_def" 2>/dev/null)"; then
-    [ -n "$__ccenv_dir" ] && export CLAUDE_CONFIG_DIR="$__ccenv_dir"
-    export CCENV_PROFILE="$__ccenv_def"
+# Auto-apply a profile to this shell when it hasn't already picked one: a
+# directory pin for $PWD (nearest wins) beats the standing default. The
+# CCENV_PROFILE guard means subshells and an explicit `ccenv use`/`unuse` always
+# win. One `ccenv resolve-auto` spawn per new shell, only when a default or pins
+# file exists (so a fresh install with neither still spawns nothing).
+if [ -z "${CCENV_PROFILE:-}" ] && { [ -e "${CCENV_HOME:-$HOME/.ccenv}/default" ] || [ -e "${CCENV_HOME:-$HOME/.ccenv}/pins" ]; }; then
+  __ccenv_auto="$(command ccenv resolve-auto "$PWD" 2>/dev/null)"
+  # Require a NAME<tab>DIR shape; ignore tab-less output (e.g. an error string
+  # from a mismatched/older binary on PATH) so it can't set a bogus profile.
+  if [ -n "$__ccenv_auto" ] && [ "$__ccenv_auto" != "${__ccenv_auto#*$'\t'}" ]; then
+    __ccenv_name="${__ccenv_auto%%$'\t'*}"
+    __ccenv_dir="${__ccenv_auto#*$'\t'}"
+    if [ -n "$__ccenv_dir" ]; then export CLAUDE_CONFIG_DIR="$__ccenv_dir"; else unset CLAUDE_CONFIG_DIR; fi
+    export CCENV_PROFILE="$__ccenv_name"
   fi
-  unset __ccenv_def __ccenv_dir
+  unset __ccenv_auto __ccenv_name __ccenv_dir
 fi

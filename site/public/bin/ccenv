@@ -20,7 +20,7 @@
 # Usage: ccenv help
 set -uo pipefail
 
-CCENV_VERSION="1.5.0"
+CCENV_VERSION="1.6.0"
 
 # ---- paths -------------------------------------------------------------------
 CCENV_HOME="${CCENV_HOME:-$HOME/.ccenv}"
@@ -50,6 +50,12 @@ BASE_CONFIG="${CCENV_BASE_CONFIG:-$HOME/.claude}"
 # integration to every new shell that hasn't already picked a profile. Name
 # only — no secrets. Kept inside the path-guarded CCENV_HOME.
 DEFAULT_FILE="$CCENV_HOME/default"
+
+# Directory pins: "<canonical-abs-path>\t<profile>" per line. A new shell whose
+# cwd is at or under a pinned path auto-applies that profile (nearest pin wins),
+# overriding the standing default. Name only — no secrets. Guarded under
+# CCENV_HOME like DEFAULT_FILE. See cmd_pin / cmd_resolve_auto.
+PINS_FILE="$CCENV_HOME/pins"
 
 # How a new profile inherits your environment:
 #
@@ -150,6 +156,59 @@ write_default() {
   printf '%s\n' "$name" > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
   mv "$tmp" "$DEFAULT_FILE" || { rm -f "$tmp"; return 1; }
+}
+
+# ---- directory pins ----------------------------------------------------------
+# Canonicalize a directory to an absolute, symlink-resolved path so pins match
+# regardless of how the user cd'd in. `cd + pwd -P` is portable (no realpath on
+# stock macOS); mirrors the idiom in install.sh. Nonzero if not a real dir.
+canon_dir() {
+  local d="${1:-$PWD}" out
+  [ -d "$d" ] || return 1
+  # `cd --` so a dir named like an option (-L, -e, -) isn't parsed as a flag and
+  # silently resolved to $HOME. CDPATH='' so a relative dir can't make `cd` jump
+  # to a CDPATH entry and echo it to stdout, poisoning the captured path.
+  out="$(CDPATH='' cd -- "$d" 2>/dev/null && pwd -P)" || return 1
+  # A TAB or newline in the path would corrupt the tab-delimited, line-based
+  # registry (and could forge extra rows). Refuse it — both when storing a pin
+  # and when matching the cwd at shell startup.
+  case "$out" in *$'\t'*|*$'\n'*) return 1 ;; esac
+  printf '%s' "$out"
+}
+
+# Print the profile pinned to an EXACT canonical path (empty if none). TAB is a
+# safe delimiter: validate_name forbids tabs in profile names.
+pin_lookup() {
+  [ -f "$PINS_FILE" ] || return 0
+  awk -F'\t' -v k="$1" '$1==k{print $2; exit}' "$PINS_FILE" 2>/dev/null
+}
+
+# Print the profile of the NEAREST pinned ancestor of a canonical path — the pin
+# whose path is the longest prefix of it on a path boundary (empty if none). One
+# awk pass over the registry, so a new shell pays at most a single spawn.
+nearest_pin() {
+  [ -f "$PINS_FILE" ] || return 0
+  awk -F'\t' -v s="$1" '
+    $1 != "" && (s == $1 || index(s, $1 "/") == 1) {
+      if (length($1) > blen) { blen = length($1); best = $2 }
+    }
+    END { if (blen) print best }
+  ' "$PINS_FILE" 2>/dev/null
+}
+
+# Atomically rewrite the pins registry from stdin (mirror of write_default).
+# An empty result deletes the file so the "no pins" fast path stays cheap.
+write_pins() { # reads new content on stdin
+  local tmp
+  mkdir -p "$CCENV_HOME" 2>/dev/null || true
+  tmp="$(mktemp "$PINS_FILE.XXXXXX")" || return 1
+  cat > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  if [ -s "$tmp" ]; then
+    mv "$tmp" "$PINS_FILE" || { rm -f "$tmp"; return 1; }
+  else
+    rm -f "$tmp" "$PINS_FILE"
+  fi
 }
 
 # Run `claude auth status --json` for a config dir (empty = default/ambient-unset).
@@ -418,6 +477,73 @@ cmd_set_default() {
   fi
 }
 
+# Pin a profile to a directory tree. A new shell whose cwd is at/under the pinned
+# path auto-applies that profile (nearest pin wins), overriding the standing
+# default. Directory defaults to the current one.
+#   ccenv pin <profile> [dir]
+cmd_pin() {
+  local name="${1:-}" dir="${2:-$PWD}"
+  [ -n "$name" ] || die "usage: ccenv pin <profile> [dir]"
+  resolve_dir "$name" >/dev/null || exit 1     # profile must exist (default/main ok)
+  local cdir; cdir="$(canon_dir "$dir")" || die "no such directory: $dir"
+  # Upsert: drop any existing pin for this exact path, then append the new one.
+  { [ -f "$PINS_FILE" ] && awk -F'\t' -v k="$cdir" '$1!=k' "$PINS_FILE"
+    printf '%s\t%s\n' "$cdir" "$name"; } | write_pins || die "could not write $PINS_FILE"
+  ok "pinned ${B}$name${X} → ${cdir/#$HOME/~}"
+  [ -z "${CCENV_SHELL_LOADED:-}" ] && warn "shell integration not loaded — it won't auto-apply (run: ccenv doctor)"
+  return 0
+}
+
+# Remove the pin for a directory (defaults to the current one).
+#   ccenv unpin [dir]
+cmd_unpin() {
+  local dir="${1:-$PWD}"
+  local cdir; cdir="$(canon_dir "$dir")" || die "no such directory: $dir"
+  if [ ! -f "$PINS_FILE" ] || [ -z "$(pin_lookup "$cdir")" ]; then
+    info "${D}no pin for ${cdir/#$HOME/~}${X}"; return 0
+  fi
+  awk -F'\t' -v k="$cdir" '$1!=k' "$PINS_FILE" | write_pins || die "could not write $PINS_FILE"
+  ok "unpinned ${cdir/#$HOME/~}"
+}
+
+# List every directory pin, flagging stale rows (profile or directory gone).
+#   ccenv pins
+cmd_pins() {
+  if [ ! -s "$PINS_FILE" ]; then
+    info "${D}no directory pins${X} — attach one with: ccenv pin <profile> [dir]"; return 0
+  fi
+  info "${B}directory pins${X}"
+  local path name flag
+  sort "$PINS_FILE" | while IFS="$(printf '\t')" read -r path name; do
+    [ -n "$path" ] || continue
+    flag=""
+    resolve_dir "$name" >/dev/null 2>&1 || flag="  ${Y}(profile '$name' missing)${X}"
+    [ -d "$path" ] || flag="$flag  ${Y}(dir gone)${X}"
+    printf '  %s%s%s → %s%s%s%s\n' "$C" "${path/#$HOME/~}" "$X" "$B" "$name" "$X" "$flag"
+  done
+}
+
+# Internal (used by the shell startup block): decide which profile a new shell
+# starting at PATH should adopt. Precedence: nearest directory pin > standing
+# default. Prints "<name>\t<dir>" (dir empty = default/ambient ~/.claude), or
+# nothing when there is nothing to apply. Always exit 0.
+cmd_resolve_auto() {
+  local start; start="$(canon_dir "${1:-$PWD}")" || start=""
+  local name=""
+  [ -n "$start" ] && name="$(nearest_pin "$start")"
+  local from_pin=1
+  [ -z "$name" ] && { name="$(read_default)"; from_pin=0; }
+  [ -n "$name" ] || return 0              # nothing configured
+  local dir
+  if ! dir="$(resolve_dir "$name" 2>/dev/null)"; then
+    # Stale pin → fall back to the standing default; stale default → give up.
+    [ "$from_pin" -eq 1 ] || return 0
+    name="$(read_default)"; [ -n "$name" ] || return 0
+    dir="$(resolve_dir "$name" 2>/dev/null)" || return 0
+  fi
+  printf '%s\t%s' "$name" "$dir"
+}
+
 cmd_remove() {
   local name="" keep=0 yes=0
   while [ $# -gt 0 ]; do
@@ -469,6 +595,12 @@ cmd_remove() {
   if [ "$(read_default)" = "$name" ]; then
     rm -f "$DEFAULT_FILE" && info "  ${D}was the default — cleared it${X}"
   fi
+
+  # Drop any directory pins that referenced the removed profile.
+  if [ -f "$PINS_FILE" ] && awk -F'\t' -v n="$name" '$2==n{f=1} END{exit !f}' "$PINS_FILE"; then
+    awk -F'\t' -v n="$name" '$2!=n' "$PINS_FILE" | write_pins
+    info "  ${D}removed directory pins for $name${X}"
+  fi
 }
 
 cmd_rename() {
@@ -484,6 +616,11 @@ cmd_rename() {
   # Follow the rename so a standing default keeps pointing at the same profile.
   if [ "$(read_default)" = "$old" ]; then
     write_default "$new" && info "  ${D}default updated: $old → $new${X}"
+  fi
+  # Follow the rename in the directory pins too.
+  if [ -f "$PINS_FILE" ] && awk -F'\t' -v o="$old" '$2==o{f=1} END{exit !f}' "$PINS_FILE"; then
+    awk -F'\t' -v o="$old" -v n="$new" 'BEGIN{OFS="\t"} $2==o{$2=n} 1' "$PINS_FILE" | write_pins
+    info "  ${D}directory pins updated: $old → $new${X}"
   fi
   ok "renamed $old → $new  ${D}(re-login needed: ccenv login $new)${X}"
 }
@@ -581,6 +718,21 @@ cmd_doctor() {
     else
       err "default profile '$def' no longer exists — clear it: ccenv default --clear"; problems=$((problems+1))
     fi
+  fi
+
+  # directory pins: report count and flag any that point at a gone profile.
+  if [ -s "$PINS_FILE" ]; then
+    local pcount ppath pname
+    pcount="$(grep -c . "$PINS_FILE" 2>/dev/null || echo 0)"
+    ok "directory pins: $pcount (ccenv pins)"
+    while IFS="$(printf '\t')" read -r ppath pname; do
+      [ -n "$ppath" ] || continue
+      if ! resolve_dir "$pname" >/dev/null 2>&1; then
+        err "  pin ${ppath/#$HOME/~} → '$pname' no longer exists — clear it: ccenv unpin ${ppath/#$HOME/~}"; problems=$((problems+1))
+      elif [ ! -d "$ppath" ]; then
+        info "  ${Y}•${X} pin dir ${ppath/#$HOME/~} is gone (profile $pname)"
+      fi
+    done < "$PINS_FILE"
   fi
 
   info ""
@@ -835,16 +987,22 @@ ccenv() {
 }
 export CCENV_SHELL_LOADED=1
 
-# Auto-apply the standing default (ccenv default <name>) to this shell when it
-# hasn't already picked a profile. The CCENV_PROFILE guard means subshells and
-# an explicit `ccenv use`/`unuse` always win over the default.
-if [ -z "${CCENV_PROFILE:-}" ] && [ -r "${CCENV_HOME:-$HOME/.ccenv}/default" ]; then
-  __ccenv_def="$(cat "${CCENV_HOME:-$HOME/.ccenv}/default" 2>/dev/null | head -n1 | tr -d '[:space:]')"
-  if [ -n "$__ccenv_def" ] && __ccenv_dir="$(command ccenv resolve "$__ccenv_def" 2>/dev/null)"; then
-    [ -n "$__ccenv_dir" ] && export CLAUDE_CONFIG_DIR="$__ccenv_dir"
-    export CCENV_PROFILE="$__ccenv_def"
+# Auto-apply a profile to this shell when it hasn't already picked one: a
+# directory pin for $PWD (nearest wins) beats the standing default. The
+# CCENV_PROFILE guard means subshells and an explicit `ccenv use`/`unuse` always
+# win. One `ccenv resolve-auto` spawn per new shell, only when a default or pins
+# file exists (so a fresh install with neither still spawns nothing).
+if [ -z "${CCENV_PROFILE:-}" ] && { [ -e "${CCENV_HOME:-$HOME/.ccenv}/default" ] || [ -e "${CCENV_HOME:-$HOME/.ccenv}/pins" ]; }; then
+  __ccenv_auto="$(command ccenv resolve-auto "$PWD" 2>/dev/null)"
+  # Require a NAME<tab>DIR shape; ignore tab-less output (e.g. an error string
+  # from a mismatched/older binary on PATH) so it can't set a bogus profile.
+  if [ -n "$__ccenv_auto" ] && [ "$__ccenv_auto" != "${__ccenv_auto#*$'\t'}" ]; then
+    __ccenv_name="${__ccenv_auto%%$'\t'*}"
+    __ccenv_dir="${__ccenv_auto#*$'\t'}"
+    if [ -n "$__ccenv_dir" ]; then export CLAUDE_CONFIG_DIR="$__ccenv_dir"; else unset CLAUDE_CONFIG_DIR; fi
+    export CCENV_PROFILE="$__ccenv_name"
   fi
-  unset __ccenv_def __ccenv_dir
+  unset __ccenv_auto __ccenv_name __ccenv_dir
 fi
 SNIPPET
 }
@@ -857,6 +1015,8 @@ ${B}ccenv${X} ${D}v${CCENV_VERSION}${X} — run multiple Claude Code accounts
   ${C}list${X}                     accounts + who's signed in
   ${C}use${X} <name> / ${C}unuse${X}       switch this shell  ${D}(needs integration)${X}
   ${C}default${X} [name]           auto-use <name> in every new shell
+  ${C}pin${X} <name> [dir]         auto-use <name> in a folder + its subdirs
+  ${C}unpin${X} [dir] / ${C}pins${X}      remove a folder pin / list pins
   ${C}run${X} <name> [-- args]     launch claude as <name>
   ${C}create${X} <name>            add an account, then sign in
   ${C}login${X} / ${C}logout${X} <name>    sign in / out
@@ -912,6 +1072,16 @@ ${B}DEFAULT PROFILE${X}
                              An explicit 'ccenv use'/'unuse' still overrides it
                              per-shell; subshells inherit the parent's choice.
 
+${B}DIRECTORY PINS${X}
+  ccenv pin <name> [dir]     Attach <name> to a folder (default: the current
+                             one). A NEW terminal opened at/under it auto-uses
+                             <name>. Saved to ${PINS_FILE/#$HOME/~}.
+  ccenv unpin [dir]          Remove the pin for a folder
+  ccenv pins                 List every pin (flags stale ones)
+                             Nearest pin wins over ancestors; a pin beats the
+                             standing default; an explicit 'ccenv use' still wins.
+                             Applied at new-shell startup only (not on cd).
+
 ${B}SHARED vs PER-PROFILE${X}
   Symlinked (shared):   plugins, skills, commands, hooks, CLAUDE.md
   Copied per profile:   settings.json, settings.local.json, mcp_config.json
@@ -940,11 +1110,15 @@ main() {
     use|unuse)          die "'$cmd' needs shell integration → restart your shell or re-source your rc (or: ccenv shell-init)" ;;
     current|active)     cmd_current "$@" ;;
     default|set-default|setdefault) cmd_set_default "$@" ;;
+    pin)                cmd_pin "$@" ;;
+    unpin)              cmd_unpin "$@" ;;
+    pins)               cmd_pins "$@" ;;
     status|st)          cmd_status "$@" ;;
     sync)               cmd_sync "$@" ;;
     remove|rm|delete)   cmd_remove "$@" ;;
     rename|mv)          cmd_rename "$@" ;;
     resolve)            resolve_dir "${1:-}" ;;   # internal: used by shell fn
+    resolve-auto)       cmd_resolve_auto "${1:-}" ;;   # internal: used by shell fn
     doctor)             cmd_doctor "$@" ;;
     update|upgrade)     cmd_update "$@" ;;
     uninstall)          cmd_uninstall "$@" ;;

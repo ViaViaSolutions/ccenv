@@ -107,6 +107,25 @@ An explicit `ccenv use <name>` / `ccenv unuse` still overrides it in that one
 shell, and subshells inherit whatever the parent picked. The choice is saved as
 a plain profile name in `~/.ccenv/default` (no secrets).
 
+### Pin a profile to a folder
+
+Attach a profile to a directory and any **new** terminal opened at or under it
+comes up on that profile — no `use` needed:
+
+```sh
+cd ~/work && ccenv pin work     # attach 'work' to ~/work (and its subdirs)
+ccenv pins                       # list every pin
+ccenv unpin ~/work               # detach (defaults to the current dir)
+```
+
+A terminal in `~/work/acme` picks `work`; one in `~/personal` falls back to your
+standing default. The **nearest** pin wins over parent folders, a pin beats the
+default, and an explicit `ccenv use` still overrides everything for that shell.
+Pins are applied when a shell starts (not on `cd`) and are saved as
+`<path>\t<profile>` lines in `~/.ccenv/pins` (no secrets). Pinning lives in a
+central registry — nothing is written into the repo, so a folder you clone can
+never silently select one of your accounts.
+
 ## Commands
 
 | Command | What it does |
@@ -115,6 +134,8 @@ a plain profile name in `~/.ccenv/default` (no secrets).
 | `use <name>` | Point the current shell at a profile |
 | `unuse` | Revert this shell to `default` |
 | `default [name]` | Auto-use `<name>` in every new shell (`--clear` to reset) |
+| `pin <name> [dir]` | Pin `<name>` to a folder (auto-use there + subdirs; default: cwd) |
+| `unpin [dir]` / `pins` | Remove a folder pin (default: cwd) / list all pins |
 | `run <name> [-- args]` | Launch a `claude` session as `<name>` |
 | `current` | Show this shell's active profile |
 | `create <name> [opts]` | New profile, then login |
