@@ -20,7 +20,7 @@
 # Usage: ccenv help
 set -uo pipefail
 
-CCENV_VERSION="1.6.0"
+CCENV_VERSION="1.7.0"
 
 # ---- paths -------------------------------------------------------------------
 CCENV_HOME="${CCENV_HOME:-$HOME/.ccenv}"
@@ -56,6 +56,12 @@ DEFAULT_FILE="$CCENV_HOME/default"
 # overriding the standing default. Name only — no secrets. Guarded under
 # CCENV_HOME like DEFAULT_FILE. See cmd_pin / cmd_resolve_auto.
 PINS_FILE="$CCENV_HOME/pins"
+
+# Cache for the "update available" notice: "<checked_epoch>\t<latest_version>".
+# Refreshed at most once/24h by a detached background check (never on the shell-
+# startup path); the visible commands just read it. Opt out with
+# CCENV_NO_UPDATE_CHECK=1.
+UPDATE_CACHE="$CCENV_HOME/.update-check"
 
 # How a new profile inherits your environment:
 #
@@ -422,6 +428,8 @@ cmd_list() {
     n=$((n + 1))
   done
   rm -rf "$tmp"
+  bg_refresh_version   # after the wait above, so it never blocks the listing
+  note_update
 }
 
 cmd_status() {
@@ -756,6 +764,57 @@ self_path() {
 # Extract CCENV_VERSION="x.y.z" from a ccenv script file.
 version_of() { grep -m1 'CCENV_VERSION=' "$1" 2>/dev/null | sed -E 's/.*CCENV_VERSION="?([^"]*)"?.*/\1/'; }
 
+# ---- update notice -----------------------------------------------------------
+# Compare two dotted versions numerically. Prints gt|lt|eq for "$1 vs $2".
+# Pure awk (portable across BSD/GNU); ignores any non-numeric pre-release suffix.
+ver_cmp() {
+  awk -v a="$1" -v b="$2" 'BEGIN{
+    na=split(a,A,"."); nb=split(b,B,"."); m=(na>nb)?na:nb
+    for(i=1;i<=m;i++){ x=(i<=na)?A[i]+0:0; y=(i<=nb)?B[i]+0:0
+      if(x>y){print "gt"; exit} if(x<y){print "lt"; exit} }
+    print "eq" }'
+}
+
+# Print a one-line "update available" notice if the cached latest version is
+# newer than the running one. Pure local read — no network, safe to call often.
+note_update() {
+  [ -n "${CCENV_NO_UPDATE_CHECK:-}" ] && return 0
+  [ -f "$UPDATE_CACHE" ] || return 0
+  local latest; latest="$(cut -f2 "$UPDATE_CACHE" 2>/dev/null)"
+  case "$latest" in [0-9]*.[0-9]*) : ;; *) return 0 ;; esac
+  if [ "$(ver_cmp "$latest" "$CCENV_VERSION")" = "gt" ]; then
+    printf '%s!%s update available: %sv%s%s  %s(run: ccenv update)%s\n' \
+      "$Y" "$X" "$B" "$latest" "$X" "$D" "$X"
+  fi
+}
+
+# Kick off a throttled, DETACHED version check. Never blocks the command the
+# user ran, never runs on the shell-startup path (only cmd_help / cmd_list call
+# it), and fetches the tiny /version file at most once per 24h.
+bg_refresh_version() {
+  [ -n "${CCENV_NO_UPDATE_CHECK:-}" ] && return 0
+  local now last=0
+  now="$(date +%s 2>/dev/null)" || return 0
+  [ -f "$UPDATE_CACHE" ] && last="$(cut -f1 "$UPDATE_CACHE" 2>/dev/null)"
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  [ $(( now - last )) -lt 86400 ] && return 0
+  local base="${CCENV_BASE_URL:-https://ccenv.dev}"
+  ( # bounded fetch; always restamp the timestamp so an offline box doesn't retry
+    # every invocation. Keep the previously-known latest if this fetch fails.
+    tmp="$(mktemp "$UPDATE_CACHE.XXXXXX")" 2>/dev/null || exit 0
+    v=""
+    if command -v curl >/dev/null 2>&1; then
+      v="$(curl -fsSL -m 3 "$base/version" 2>/dev/null | head -n1 | tr -d '[:space:]')"
+    elif command -v wget >/dev/null 2>&1; then
+      v="$(wget -q --timeout=3 -O - "$base/version" 2>/dev/null | head -n1 | tr -d '[:space:]')"
+    fi
+    case "$v" in [0-9]*.[0-9]*) : ;; *) v="" ;; esac
+    [ -z "$v" ] && [ -f "$UPDATE_CACHE" ] && v="$(cut -f2 "$UPDATE_CACHE" 2>/dev/null)"
+    [ -z "$v" ] && v="$CCENV_VERSION"
+    printf '%s\t%s\n' "$now" "$v" > "$tmp" && chmod 600 "$tmp" 2>/dev/null && mv "$tmp" "$UPDATE_CACHE" || rm -f "$tmp"
+  ) >/dev/null 2>&1 &
+}
+
 # Update ccenv in place to the latest build published at CCENV_BASE_URL.
 # ALWAYS fetches from the hosted build (ccenv.dev by default), for every install
 # type. A clone install's PATH entry is a symlink into the repo; we replace that
@@ -957,10 +1016,11 @@ ccenv() {
       if ! __d="$(command ccenv resolve "$2")"; then return 1; fi
       if [ -z "$__d" ]; then unset CLAUDE_CONFIG_DIR; else export CLAUDE_CONFIG_DIR="$__d"; fi
       export CCENV_PROFILE="$2"
+      unset CCENV_AUTO                # explicit choice — never auto-re-resolved
       command ccenv current
       ;;
     unuse)
-      unset CLAUDE_CONFIG_DIR CCENV_PROFILE
+      unset CLAUDE_CONFIG_DIR CCENV_PROFILE CCENV_AUTO
       command ccenv current
       ;;
     default|set-default|setdefault)
@@ -979,7 +1039,7 @@ ccenv() {
         0) : ;;
         *) return "$__rc" ;;
       esac
-      unset CLAUDE_CONFIG_DIR CCENV_PROFILE CCENV_SHELL_LOADED
+      unset CLAUDE_CONFIG_DIR CCENV_PROFILE CCENV_AUTO CCENV_SHELL_LOADED
       unset -f ccenv
       ;;
     *) command ccenv "$@" ;;
@@ -987,20 +1047,29 @@ ccenv() {
 }
 export CCENV_SHELL_LOADED=1
 
-# Auto-apply a profile to this shell when it hasn't already picked one: a
-# directory pin for $PWD (nearest wins) beats the standing default. The
-# CCENV_PROFILE guard means subshells and an explicit `ccenv use`/`unuse` always
-# win. One `ccenv resolve-auto` spawn per new shell, only when a default or pins
-# file exists (so a fresh install with neither still spawns nothing).
-if [ -z "${CCENV_PROFILE:-}" ] && { [ -e "${CCENV_HOME:-$HOME/.ccenv}/default" ] || [ -e "${CCENV_HOME:-$HOME/.ccenv}/pins" ]; }; then
-  __ccenv_auto="$(command ccenv resolve-auto "$PWD" 2>/dev/null)"
+# Auto-apply a profile to this shell based on $PWD: the nearest directory pin
+# wins, else the standing default. Re-resolve when this shell has NO profile yet,
+# OR when the inherited profile was itself auto-applied (CCENV_AUTO) — otherwise
+# an auto profile would leak out of the directory it was set in through a new
+# tab / editor terminal / tmux pane that inherits the environment. An explicit
+# `ccenv use` clears CCENV_AUTO, so it is never re-resolved and sticks across
+# subshells. One `ccenv resolve-auto` spawn, only when a default or pins exists.
+if [ -z "${CCENV_PROFILE:-}" ] || [ -n "${CCENV_AUTO:-}" ]; then
+  __ccenv_auto=""
+  if [ -e "${CCENV_HOME:-$HOME/.ccenv}/default" ] || [ -e "${CCENV_HOME:-$HOME/.ccenv}/pins" ]; then
+    __ccenv_auto="$(command ccenv resolve-auto "$PWD" 2>/dev/null)"
+  fi
   # Require a NAME<tab>DIR shape; ignore tab-less output (e.g. an error string
   # from a mismatched/older binary on PATH) so it can't set a bogus profile.
   if [ -n "$__ccenv_auto" ] && [ "$__ccenv_auto" != "${__ccenv_auto#*$'\t'}" ]; then
     __ccenv_name="${__ccenv_auto%%$'\t'*}"
     __ccenv_dir="${__ccenv_auto#*$'\t'}"
     if [ -n "$__ccenv_dir" ]; then export CLAUDE_CONFIG_DIR="$__ccenv_dir"; else unset CLAUDE_CONFIG_DIR; fi
-    export CCENV_PROFILE="$__ccenv_name"
+    export CCENV_PROFILE="$__ccenv_name" CCENV_AUTO=1
+  elif [ -n "${CCENV_AUTO:-}" ]; then
+    # An auto-applied profile was inherited but nothing applies to this dir —
+    # revert it so it can't leak from the directory it was set in.
+    unset CLAUDE_CONFIG_DIR CCENV_PROFILE CCENV_AUTO
   fi
   unset __ccenv_auto __ccenv_name __ccenv_dir
 fi
@@ -1008,7 +1077,9 @@ SNIPPET
 }
 
 cmd_help() {
+  bg_refresh_version
   if [ "${1:-}" = "full" ] || [ "${1:-}" = "-v" ] || [ "${1:-}" = "--verbose" ]; then cmd_help_full; return; fi
+  note_update
   cat <<EOF
 ${B}ccenv${X} ${D}v${CCENV_VERSION}${X} — run multiple Claude Code accounts
 
@@ -1033,6 +1104,7 @@ EOF
 }
 
 cmd_help_full() {
+  note_update
   cat <<EOF
 ${B}ccenv${X} ${D}v${CCENV_VERSION}${X} — multiple Claude Code accounts, secure & concurrent
 
@@ -1056,6 +1128,9 @@ ${B}UPDATE OPTIONS${X}
   --check                    Report the available version without changing anything
   --force                    Reinstall even if already on the latest version
                              (origin: CCENV_BASE_URL, default https://ccenv.dev)
+  ccenv list / help          Show an "update available" notice when a newer build
+                             exists (checked in the background at most once/day).
+                             Set CCENV_NO_UPDATE_CHECK=1 to disable that check.
 
 ${B}UNINSTALL OPTIONS${X}
   ccenv uninstall         Remove the installed command, rc lines, and shell

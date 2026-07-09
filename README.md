@@ -126,6 +126,12 @@ Pins are applied when a shell starts (not on `cd`) and are saved as
 central registry — nothing is written into the repo, so a folder you clone can
 never silently select one of your accounts.
 
+Auto-applied profiles are re-resolved for **every** new terminal from its own
+directory, so a pin never leaks out of its folder — even into a new tab, editor
+terminal, or tmux pane that inherits the environment of a shell that was in a
+pinned directory. Only an explicit `ccenv use` is sticky and carries into
+subshells (until you `unuse` or open a fresh terminal).
+
 ## Commands
 
 | Command | What it does |
@@ -209,6 +215,11 @@ ccenv update --check   # just report the available version
 atomically replaces the running binary (safe — rename swaps the directory entry,
 not the inode the process is reading). For a clone install the PATH symlink is
 replaced with the downloaded copy; your repo working tree is left untouched.
+
+`ccenv list` and `ccenv help` show a one-line **update available** notice when a
+newer build exists — checked in the background at most once a day (a tiny
+`ccenv.dev/version` fetch, never on the shell-startup path). Opt out with
+`CCENV_NO_UPDATE_CHECK=1`.
 Override the origin with `CCENV_BASE_URL` (handy for testing a preview deploy).
 
 ## Uninstall

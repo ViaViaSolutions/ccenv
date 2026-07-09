@@ -20,10 +20,11 @@ ccenv() {
         export CLAUDE_CONFIG_DIR="$__d"
       fi
       export CCENV_PROFILE="$2"
+      unset CCENV_AUTO                # explicit choice — never auto-re-resolved
       command ccenv current
       ;;
     unuse)
-      unset CLAUDE_CONFIG_DIR CCENV_PROFILE
+      unset CLAUDE_CONFIG_DIR CCENV_PROFILE CCENV_AUTO
       command ccenv current
       ;;
     default|set-default|setdefault)
@@ -45,7 +46,7 @@ ccenv() {
         0) : ;;
         *) return "$__rc" ;;
       esac
-      unset CLAUDE_CONFIG_DIR CCENV_PROFILE CCENV_SHELL_LOADED
+      unset CLAUDE_CONFIG_DIR CCENV_PROFILE CCENV_AUTO CCENV_SHELL_LOADED
       unset -f ccenv
       ;;
     *)
@@ -56,20 +57,29 @@ ccenv() {
 
 export CCENV_SHELL_LOADED=1
 
-# Auto-apply a profile to this shell when it hasn't already picked one: a
-# directory pin for $PWD (nearest wins) beats the standing default. The
-# CCENV_PROFILE guard means subshells and an explicit `ccenv use`/`unuse` always
-# win. One `ccenv resolve-auto` spawn per new shell, only when a default or pins
-# file exists (so a fresh install with neither still spawns nothing).
-if [ -z "${CCENV_PROFILE:-}" ] && { [ -e "${CCENV_HOME:-$HOME/.ccenv}/default" ] || [ -e "${CCENV_HOME:-$HOME/.ccenv}/pins" ]; }; then
-  __ccenv_auto="$(command ccenv resolve-auto "$PWD" 2>/dev/null)"
+# Auto-apply a profile to this shell based on $PWD: the nearest directory pin
+# wins, else the standing default. Re-resolve when this shell has NO profile yet,
+# OR when the inherited profile was itself auto-applied (CCENV_AUTO) — otherwise
+# an auto profile would leak out of the directory it was set in through a new
+# tab / editor terminal / tmux pane that inherits the environment. An explicit
+# `ccenv use` clears CCENV_AUTO, so it is never re-resolved and sticks across
+# subshells. One `ccenv resolve-auto` spawn, only when a default or pins exists.
+if [ -z "${CCENV_PROFILE:-}" ] || [ -n "${CCENV_AUTO:-}" ]; then
+  __ccenv_auto=""
+  if [ -e "${CCENV_HOME:-$HOME/.ccenv}/default" ] || [ -e "${CCENV_HOME:-$HOME/.ccenv}/pins" ]; then
+    __ccenv_auto="$(command ccenv resolve-auto "$PWD" 2>/dev/null)"
+  fi
   # Require a NAME<tab>DIR shape; ignore tab-less output (e.g. an error string
   # from a mismatched/older binary on PATH) so it can't set a bogus profile.
   if [ -n "$__ccenv_auto" ] && [ "$__ccenv_auto" != "${__ccenv_auto#*$'\t'}" ]; then
     __ccenv_name="${__ccenv_auto%%$'\t'*}"
     __ccenv_dir="${__ccenv_auto#*$'\t'}"
     if [ -n "$__ccenv_dir" ]; then export CLAUDE_CONFIG_DIR="$__ccenv_dir"; else unset CLAUDE_CONFIG_DIR; fi
-    export CCENV_PROFILE="$__ccenv_name"
+    export CCENV_PROFILE="$__ccenv_name" CCENV_AUTO=1
+  elif [ -n "${CCENV_AUTO:-}" ]; then
+    # An auto-applied profile was inherited but nothing applies to this dir —
+    # revert it so it can't leak from the directory it was set in.
+    unset CLAUDE_CONFIG_DIR CCENV_PROFILE CCENV_AUTO
   fi
   unset __ccenv_auto __ccenv_name __ccenv_dir
 fi

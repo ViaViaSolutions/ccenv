@@ -28,4 +28,8 @@ cp "$root/shell/ccenv.sh" "$pub/shell/ccenv.sh"
 cp "$root/install.sh"     "$pub/install.sh"
 cp "$root/uninstall.sh"   "$pub/uninstall.sh"
 
-echo "sync-dist: install.sh, uninstall.sh, bin/ccenv, shell/ccenv.sh → public/"
+# Publish the current version as a tiny file so `ccenv` can check for updates
+# (served at ccenv.dev/version) without downloading the whole ~40KB binary.
+grep -m1 'CCENV_VERSION=' "$root/bin/ccenv" | sed -E 's/.*"([^"]+)".*/\1/' > "$pub/version"
+
+echo "sync-dist: install.sh, uninstall.sh, bin/ccenv, shell/ccenv.sh, version → public/"
