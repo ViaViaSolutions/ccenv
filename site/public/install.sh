@@ -46,7 +46,7 @@ else
   DL_TMP="$(mktemp -d)" || { echo "cannot create temp dir" >&2; exit 1; }
   trap 'rm -rf "$DL_TMP"' EXIT
   step "downloading ccenv from $BASE_URL"
-  fetch "$BASE_URL/bin/ccenv"      "$DL_TMP/ccenv"    || { echo "download failed: $BASE_URL/bin/ccenv"  >&2; exit 1; }
+  fetch "$BASE_URL/bin/ccenv?e=install" "$DL_TMP/ccenv" || { echo "download failed: $BASE_URL/bin/ccenv"  >&2; exit 1; }
   fetch "$BASE_URL/shell/ccenv.sh" "$DL_TMP/ccenv.sh" || { echo "download failed: $BASE_URL/shell/ccenv.sh" >&2; exit 1; }
   # Sanity-check before installing: reject HTML error pages / truncated bodies.
   { head -n1 "$DL_TMP/ccenv" | grep -q '^#!' && grep -q 'CCENV_VERSION=' "$DL_TMP/ccenv"; } \

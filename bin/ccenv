@@ -632,7 +632,9 @@ cmd_update() {
   # trap fired at process exit. Clean up explicitly on every path instead.
 
   info "checking $base for the latest ccenv…"
-  fetch "$base/bin/ccenv" "$tmp" || { rm -f "$tmp"; die "download failed: $base/bin/ccenv"; }
+  # Tag the fetch so the server can tell a real update from a mere --check.
+  local ev="update"; [ "$check" -eq 1 ] && ev="check"
+  fetch "$base/bin/ccenv?e=$ev" "$tmp" || { rm -f "$tmp"; die "download failed: $base/bin/ccenv"; }
   # Reject HTML error pages / truncated bodies before trusting the file.
   { head -n1 "$tmp" | grep -q '^#!' && grep -q 'CCENV_VERSION=' "$tmp"; } \
     || { rm -f "$tmp"; die "downloaded file doesn't look like ccenv — aborting (nothing changed)"; }
