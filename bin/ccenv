@@ -20,7 +20,7 @@
 # Usage: ccenv help
 set -uo pipefail
 
-CCENV_VERSION="1.7.3"
+CCENV_VERSION="1.7.4"
 
 # ---- paths -------------------------------------------------------------------
 CCENV_HOME="${CCENV_HOME:-$HOME/.ccenv}"
@@ -433,6 +433,7 @@ cmd_list() {
   rm -rf "$tmp"
   bg_refresh_version   # after the wait above, so it never blocks the listing
   note_update
+  note_ccdesktop
 }
 
 cmd_status() {
@@ -789,6 +790,20 @@ note_update() {
     printf '%s!%s update available: %sv%s%s  %s(run: ccenv update)%s\n' \
       "$Y" "$X" "$B" "$latest" "$X" "$D" "$X"
   fi
+}
+
+# Local, no-network nudge: on macOS, if the bundled ccdesktop sibling isn't on
+# PATH, say how to add it. Covers the one-update transition lag — the release
+# that introduces the bundle can only backfill ccdesktop on the NEXT update (the
+# update itself runs the PREVIOUS binary's code), so a user who just landed here
+# won't have ccdesktop until they update once more. Self-clears once it's
+# installed. Opt out with CCENV_NO_CCDESKTOP=1.
+note_ccdesktop() {
+  [ -n "${CCENV_NO_CCDESKTOP:-}" ] && return 0
+  [ "$(uname -s 2>/dev/null)" = "Darwin" ] || return 0
+  command -v ccdesktop >/dev/null 2>&1 && return 0
+  printf '%s!%s ccdesktop (run multiple Claude Desktop accounts) not installed — %sccenv update%s to add it  %s(CCENV_NO_CCDESKTOP=1 to hide)%s\n' \
+    "$Y" "$X" "$C" "$X" "$D" "$X"
 }
 
 # Kick off a throttled, DETACHED version check. Never blocks the command the
