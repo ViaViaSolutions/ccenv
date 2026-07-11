@@ -116,13 +116,16 @@ fetch() { # url dest
 validate_name() {
   local n="${1:-}"
   [ -n "$n" ] || { err "profile name required"; return 1; }
+  # Single-pass allowlist via `case`. `grep -qE '^...$'` anchors PER LINE, so a
+  # newline-containing name whose first line is clean would slip through (the
+  # keychain path / dir name then holds a control char); `*[!set]*` rejects a
+  # newline or any out-of-charset byte anywhere in the string.
   case "$n" in
-    */*|.|..) err "invalid profile name: $n"; return 1 ;;
+    */*|.|..)          err "invalid profile name: $n"; return 1 ;;
+    *[!A-Za-z0-9._-]*) err "invalid profile name '$n' (use letters, digits, . _ -)"; return 1 ;;
+    [A-Za-z0-9]*)      return 0 ;;
+    *)                 err "invalid profile name '$n' (must start with a letter or digit)"; return 1 ;;
   esac
-  if ! printf '%s' "$n" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
-    err "invalid profile name '$n' (use letters, digits, . _ -)"; return 1
-  fi
-  return 0
 }
 
 is_default() { [ "${1:-}" = "default" ] || [ "${1:-}" = "main" ]; }
@@ -304,7 +307,7 @@ cmd_create() {
     case "$1" in
       --isolated)    isolated=1 ;;
       --no-login)    do_login=0 ;;
-      --share-from)  shift; share_from="${1:-}" ;;
+      --share-from)  shift; case "${1:-}" in -*|"") die "--share-from needs a directory" ;; esac; share_from="$1" ;;
       --email)       shift; login_args+=(--email "${1:-}") ;;
       --console|--sso|--claudeai) login_args+=("$1") ;;
       -*)            die "unknown option: $1" ;;
