@@ -25,6 +25,16 @@ const COMMANDS = [
   { bin: "ccenv", sub: "uninstall", args: "", desc: "Remove ccenv itself; --purge also deletes every profile." },
 ];
 
+const CCDESKTOP_COMMANDS = [
+  { bin: "ccdesktop", sub: "open", args: "<name>", desc: "Launch the Claude Desktop app as an account — its own window and session." },
+  { bin: "ccdesktop", sub: "create", args: "<name>", desc: "Make a profile and launch it to sign in; --isolated skips seeding." },
+  { bin: "ccdesktop", sub: "list", args: "", desc: "Every profile; ● marks the ones running right now." },
+  { bin: "ccdesktop", sub: "running", args: "", desc: "Show running profiles with their process ids." },
+  { bin: "ccdesktop", sub: "stop", args: "<name>", desc: "Quit one profile's instance (never touches the base app)." },
+  { bin: "ccdesktop", sub: "remove", args: "<name>", desc: "Delete a profile (guarded; refuses the default app)." },
+  { bin: "ccdesktop", sub: "doctor", args: "", desc: "Health-check the app, base dir and running profiles." },
+];
+
 const INHERITANCE = [
   {
     num: "i",
@@ -92,6 +102,7 @@ export default function Home() {
             <a href="#capabilities">What it does</a>
             <a href="#how-it-works">How it works</a>
             <a href="#commands">Commands</a>
+            <a href="#desktop">Desktop</a>
             <a href="#security">Security</a>
           </nav>
           <a href="#install-cmd" className="masthead__cta">
@@ -279,10 +290,100 @@ export default function Home() {
           </div>
         </section>
 
+        {/* ─── Claude Desktop ─────────────────────────── */}
+        <section className="sheet sheet--sink" id="desktop">
+          <div className="wrap" data-reveal>
+            <SheetHead index="05" kicker="Claude Desktop · macOS">
+              The same idea for the desktop app. Bundled, nothing extra to install.
+            </SheetHead>
+
+            <p className="body" style={{ fontSize: "1.15rem" }}>
+              <code>ccdesktop</code> runs multiple{" "}
+              <a
+                href="https://claude.com/download"
+                className="underline decoration-[var(--spot)] underline-offset-4 hover:text-[var(--ink)]"
+                style={{ color: "var(--ink-2)" }}
+              >
+                Claude Desktop
+              </a>{" "}
+              accounts at once, each in its own window. The desktop app has no{" "}
+              <code>CLAUDE_CONFIG_DIR</code>, so every account gets its own Chromium{" "}
+              <code>--user-data-dir</code>: a separate login and a separate MCP
+              config, running side by side. It installs with ccenv on macOS and
+              rides the same <code>ccenv update</code>.
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-16 gap-y-12 mt-4">
+              <div>
+                <p className="kicker mb-4" style={{ color: "var(--ink-3)" }}>A · A window per account</p>
+                <h3 className="guard__title mb-4" style={{ fontSize: "1.5rem" }}>Two accounts, two windows.</h3>
+                <p className="body">
+                  <code>ccdesktop open work</code> launches a second instance with
+                  its own session; your everyday app keeps running untouched as{" "}
+                  <code>default</code>.
+                </p>
+              </div>
+              <div>
+                <p className="kicker mb-4" style={{ color: "var(--ink-3)" }}>B · No secrets stored</p>
+                <h3 className="guard__title mb-4" style={{ fontSize: "1.5rem" }}>The login stays in the app.</h3>
+                <p className="body">
+                  ccdesktop holds no tokens. The session lives inside the profile
+                  directory, encrypted by the app&apos;s own macOS Keychain key.
+                  Removing a profile never signs you out elsewhere.
+                </p>
+              </div>
+            </div>
+
+            <figure className="mt-16 max-w-3xl">
+              <figcaption className="kicker mb-3">Two desktop accounts at once</figcaption>
+              <Terminal title="zsh" className="shadow-[5px_5px_0_var(--ink)]">
+                <Prompt>ccdesktop list</Prompt>
+                {"\n"}
+                <span style={{ color: "var(--spot)" }}>●</span>
+                {" work       "}
+                <span style={{ color: "var(--term-fg)" }}>running</span>
+                {"\n  personal   "}
+                <Comment>stopped</Comment>
+                {"\n"}
+                <Prompt>ccdesktop open personal</Prompt>
+                {"\n"}
+                <Comment># opens its own window, signed in separately</Comment>
+              </Terminal>
+            </figure>
+
+            <table className="spec mt-16">
+              <caption className="sr-only">ccdesktop commands</caption>
+              <tbody>
+                {CCDESKTOP_COMMANDS.map(({ bin, sub, args, desc }) => (
+                  <tr key={sub}>
+                    <td className="spec__cmd">
+                      <span className="spec__bin">{bin}</span>{" "}
+                      <span className="spec__sub">{sub}</span>
+                      {args && (
+                        <>
+                          {" "}
+                          <span className="spec__arg">{args}</span>
+                        </>
+                      )}
+                    </td>
+                    <td className="spec__desc">{desc}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <p className="body mt-6" style={{ fontSize: "0.95rem", color: "var(--ink-3)", maxWidth: "none" }}>
+              macOS only, bundled with ccenv — nothing extra to install, and{" "}
+              <code>ccenv update</code> keeps it current. <code>ccdesktop help</code>{" "}
+              prints the full reference.
+            </p>
+          </div>
+        </section>
+
         {/* ─── Security ───────────────────────────────── */}
         <section className="sheet" id="security">
           <div className="wrap" data-reveal>
-            <SheetHead index="05" kicker="Security">
+            <SheetHead index="06" kicker="Security">
               It holds none of your secrets.
             </SheetHead>
 

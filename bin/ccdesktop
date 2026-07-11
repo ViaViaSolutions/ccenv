@@ -1,0 +1,448 @@
+#!/usr/bin/env bash
+# ccdesktop — run multiple Claude Desktop (macOS app) accounts concurrently.
+#
+# Model:
+#   Claude Desktop is an Electron app. Its login session lives INSIDE its
+#   user-data directory (Cookies / Local Storage), encrypted at rest by a single
+#   app-level macOS Keychain key ("Claude Safe Storage"). Unlike Claude Code
+#   (the CLI, see `ccenv`), there is no CLAUDE_CONFIG_DIR-style env var and no
+#   per-account Keychain entry — so the CLI's isolation trick does NOT port.
+#
+#   What DOES work: Electron honors Chromium's `--user-data-dir` flag. Point each
+#   account at its own directory and a second instance runs alongside the first,
+#   with its own cookie jar (= its own logged-in account) and its own MCP config.
+#   Verified: the flag is respected and a separate instance launches concurrently.
+#
+#   A "profile" is one such user-data directory under ~/.ccdesktop/profiles/<name>.
+#   The special profile "default" is the normal app (~/Library/Application
+#   Support/Claude) launched with no override.
+#
+#   ccdesktop never reads, writes, or stores credentials. It only manages
+#   directories and launches/quits the app. First launch of a profile shows a
+#   fresh login screen; the session then persists in that profile's directory.
+#
+#   macOS only (Claude Desktop is a macOS/Windows app; this tool targets macOS).
+#
+# Usage: ccdesktop help
+set -uo pipefail
+
+CCDESK_VERSION="0.1.0"
+
+# ---- platform ----------------------------------------------------------------
+case "$(uname -s 2>/dev/null)" in
+  Darwin) : ;;
+  *) printf 'ccdesktop: macOS only (Claude Desktop is a macOS app)\n' >&2; exit 1 ;;
+esac
+
+# ---- paths -------------------------------------------------------------------
+CCDESK_HOME="${CCDESK_HOME:-$HOME/.ccdesktop}"
+
+# Normalize away trailing slashes BEFORE validating (mirrors ccenv): "$HOME//"
+# would slip past the case guard, and "link/" past the -L check.
+while [ "${CCDESK_HOME%/}" != "$CCDESK_HOME" ]; do CCDESK_HOME="${CCDESK_HOME%/}"; done
+
+# Safety guard: CCDESK_HOME backs rm -rf (cmd_remove), so a stray/hostile value
+# (/, $HOME, a path with .., or a symlink) must never get there. Require a real
+# path strictly under $HOME with no traversal.
+case "$CCDESK_HOME" in
+  *..*)        printf 'ccdesktop: refusing CCDESK_HOME with "..": %s\n' "$CCDESK_HOME" >&2; exit 1 ;;
+  "$HOME"/?*)  : ;;
+  *)           printf 'ccdesktop: refusing unsafe CCDESK_HOME=%s (must be a dir under %s)\n' "$CCDESK_HOME" "$HOME" >&2; exit 1 ;;
+esac
+if [ -L "$CCDESK_HOME" ]; then
+  printf 'ccdesktop: CCDESK_HOME is a symlink — refusing: %s\n' "$CCDESK_HOME" >&2; exit 1
+fi
+
+PROFILES_DIR="$CCDESK_HOME/profiles"
+BASE_DIR="${CCDESK_BASE_DIR:-$HOME/Library/Application Support/Claude}"
+
+# The one config file worth seeding into a new profile: the MCP server list. It
+# is COPIED (not symlinked) so concurrent instances never race on it, and each
+# account can diverge. Everything else (cookies/session/history) is created
+# fresh per profile, which is what makes the accounts independent.
+SEED_COPY=(claude_desktop_config.json)
+
+umask 077
+
+# ---- colors ------------------------------------------------------------------
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  B=$'\033[1m'; D=$'\033[2m'; R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; C=$'\033[36m'; X=$'\033[0m'
+else
+  B=""; D=""; R=""; G=""; Y=""; C=""; X=""
+fi
+
+# ---- output helpers ----------------------------------------------------------
+err()  { printf '%sccdesktop:%s %s\n' "$R" "$X" "$*" >&2; }
+die()  { err "$*"; exit 1; }
+info() { printf '%s\n' "$*"; }
+ok()   { printf '%s✓%s %s\n' "$G" "$X" "$*"; }
+warn() { printf '%s!%s %s\n' "$Y" "$X" "$*"; }
+
+# ---- app discovery -----------------------------------------------------------
+# Absolute path to Claude.app. Honors CCDESK_APP; falls back to the usual
+# install locations, then Spotlight by bundle id.
+find_app() {
+  if [ -n "${CCDESK_APP:-}" ]; then
+    [ -d "$CCDESK_APP" ] || { err "CCDESK_APP is not an app bundle: $CCDESK_APP"; return 1; }
+    printf '%s' "$CCDESK_APP"; return 0
+  fi
+  local c
+  for c in "/Applications/Claude.app" "$HOME/Applications/Claude.app"; do
+    [ -d "$c" ] && { printf '%s' "$c"; return 0; }
+  done
+  c="$(mdfind "kMDItemCFBundleIdentifier == 'com.anthropic.claudefordesktop'" 2>/dev/null | head -n1)"
+  [ -n "$c" ] && [ -d "$c" ] && { printf '%s' "$c"; return 0; }
+  err "Claude.app not found (install Claude Desktop, or set CCDESK_APP=/path/to/Claude.app)"; return 1
+}
+
+# ---- profile model -----------------------------------------------------------
+validate_name() {
+  local n="${1:-}"
+  [ -n "$n" ] || { err "profile name required"; return 1; }
+  # Single-pass allowlist via `case`. Unlike `grep -qE '^...$'` (whose anchors are
+  # PER LINE, so a newline-containing name whose first line is clean slips through),
+  # `*[!set]*` rejects a newline or any out-of-charset byte anywhere in the string.
+  case "$n" in
+    */*|.|..)          err "invalid profile name: $n"; return 1 ;;
+    *[!A-Za-z0-9._-]*) err "invalid profile name '$n' (use letters, digits, . _ -)"; return 1 ;;
+    [A-Za-z0-9]*)      return 0 ;;
+    *)                 err "invalid profile name '$n' (must start with a letter or digit)"; return 1 ;;
+  esac
+}
+
+is_default() { [ "${1:-}" = "default" ] || [ "${1:-}" = "main" ]; }
+
+profile_dir() { printf '%s/%s' "$PROFILES_DIR" "$1"; }
+
+# Echo the user-data dir for a profile (default/main → the base app dir).
+# Nonzero if a non-default profile does not exist yet.
+resolve_dir() {
+  local n="${1:-}"
+  validate_name "$n" || return 1
+  if is_default "$n"; then printf '%s' "$BASE_DIR"; return 0; fi
+  local d; d="$(profile_dir "$n")"
+  if [ ! -d "$d" ]; then err "no such profile: $n  (try: ccdesktop create $n)"; return 1; fi
+  printf '%s' "$d"
+}
+
+list_profiles() {
+  printf 'default\n'
+  if [ -d "$PROFILES_DIR" ]; then
+    # Exclude any stray dir named default/main so it can't produce a duplicate or
+    # a phantom "main" row (create blocks those names; this covers a manual mkdir).
+    find "$PROFILES_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null \
+      | grep -vxE 'default|main' | sort
+  fi
+}
+
+# ---- running-instance detection ----------------------------------------------
+# PIDs of the app processes whose user-data dir is EXACTLY $1. Matching the full
+# `--user-data-dir=<dir>` argument on a boundary (trailing space OR end-of-line)
+# means profile "work" never matches "work2", and the user's real Claude (which
+# launches WITHOUT the flag) never matches a managed profile — so stop/kill can
+# never hit the wrong instance. String match, not regex: dir paths may contain
+# regex metacharacters.
+pids_for_dir() {
+  local dir="$1" pid cmd
+  # Match only MAIN app processes (helpers live under .../Frameworks/... and don't
+  # match this path); the main carries the --user-data-dir flag, and killing it
+  # tears its helpers down. Narrower than 'Claude' → fewer per-pid `ps` spawns.
+  for pid in $(pgrep -f 'Claude.app/Contents/MacOS/Claude' 2>/dev/null); do
+    cmd="$(ps -ww -o command= -p "$pid" 2>/dev/null)" || continue
+    case "$cmd" in
+      *"--user-data-dir=$dir "*|*"--user-data-dir=$dir") printf '%s\n' "$pid" ;;
+    esac
+  done
+}
+
+# For "default" we can't fingerprint by flag (the base app has none). Report the
+# base app as running if any Claude process exists with NO --user-data-dir.
+default_running() {
+  local pid cmd
+  for pid in $(pgrep -f 'Claude.app/Contents/MacOS/Claude' 2>/dev/null); do
+    cmd="$(ps -ww -o command= -p "$pid" 2>/dev/null)" || continue
+    case "$cmd" in
+      *'--user-data-dir='*) : ;;
+      *) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+is_running() { # profile-name
+  if is_default "$1"; then default_running; else [ -n "$(pids_for_dir "$(profile_dir "$1")")" ]; fi
+}
+
+# ---- seeding -----------------------------------------------------------------
+seed_profile() {
+  local dir="$1" base="$2" asset
+  for asset in ${SEED_COPY[@]+"${SEED_COPY[@]}"}; do
+    if [ -f "$base/$asset" ] && [ ! -e "$dir/$asset" ]; then
+      cp "$base/$asset" "$dir/$asset"          # content copy; umask 077 applies
+      chmod 600 "$dir/$asset" 2>/dev/null || true
+    fi
+  done
+}
+
+# ---- launch ------------------------------------------------------------------
+launch_profile() {
+  local dir="$1" app
+  app="$(find_app)" || return 1
+  if is_default_dir "$dir"; then
+    # Normal app: no override. A 2nd launch just focuses the existing instance
+    # (Electron single-instance lock is keyed to the base user-data dir).
+    open -a "$app"
+  else
+    # -n forces a NEW instance; --args passes the flag through to Electron.
+    open -n -a "$app" --args --user-data-dir="$dir"
+  fi
+}
+
+is_default_dir() { [ "$1" = "$BASE_DIR" ]; }
+
+# ---- commands ----------------------------------------------------------------
+
+cmd_create() {
+  local name="" isolated=0 do_launch=1 share_from="$BASE_DIR"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --isolated)   isolated=1 ;;
+      --no-launch)  do_launch=0 ;;
+      --share-from) shift; case "${1:-}" in -*|"") die "--share-from needs a directory" ;; esac; share_from="$1" ;;
+      -*)           die "unknown option: $1" ;;
+      *)            [ -z "$name" ] && name="$1" || die "unexpected argument: $1" ;;
+    esac
+    shift
+  done
+  validate_name "$name" || exit 1
+  is_default "$name" && die "'$name' is reserved (it is the normal Claude app)"
+  local dir; dir="$(profile_dir "$name")"
+  [ -e "$dir" ] && die "profile already exists: $name"
+
+  mkdir -p "$dir"
+  chmod 700 "$CCDESK_HOME" "$PROFILES_DIR" "$dir" 2>/dev/null || true
+
+  if [ "$isolated" -eq 0 ] && [ -d "$share_from" ]; then
+    seed_profile "$dir" "$share_from"
+  fi
+  ok "created ${B}$name${X}  ${D}${dir/#$HOME/~}${X}"
+
+  if [ "$do_launch" -eq 1 ]; then
+    info "${D}launching — sign in to the account you want for this profile${X}"
+    launch_profile "$dir" || exit 1
+  else
+    info "${D}later: ccdesktop open $name${X}"
+  fi
+}
+
+cmd_open() {
+  local name="${1:-}"
+  local dir; dir="$(resolve_dir "$name")" || exit 1
+  launch_profile "$dir" || exit 1
+  if is_default "$name"; then
+    ok "opened ${B}default${X} (normal Claude app)"
+  else
+    ok "opened ${B}$name${X}  ${D}${dir/#$HOME/~}${X}"
+  fi
+}
+
+cmd_list() {
+  local name run mark
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    if is_running "$name"; then mark="${C}●${X}"; run="${G}running${X}"; else mark=" "; run="${D}stopped${X}"; fi
+    printf '%b %s%-12s%s %s\n' "$mark" "$B" "$name" "$X" "$run"
+  done < <(list_profiles)
+}
+
+cmd_running() {
+  local name pids any=0
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    if is_default "$name"; then
+      default_running && { printf '%s%-12s%s %s\n' "$B" "$name" "$X" "${D}(base app)${X}"; any=1; }
+      continue
+    fi
+    pids="$(pids_for_dir "$(profile_dir "$name")" | tr '\n' ' ')"
+    if [ -n "${pids// /}" ]; then
+      printf '%s%-12s%s %spids:%s %s\n' "$B" "$name" "$X" "$D" "$X" "$pids"
+      any=1
+    fi
+  done < <(list_profiles)
+  [ "$any" -eq 0 ] && info "${D}no Claude Desktop profiles running${X}"
+}
+
+cmd_stop() {
+  local name="${1:-}"
+  validate_name "$name" || exit 1
+  if is_default "$name"; then
+    die "won't quit the normal Claude app from here — quit it yourself (⌘Q)"
+  fi
+  local dir; dir="$(profile_dir "$name")"
+  [ -d "$dir" ] || die "no such profile: $name"
+  local pids; pids="$(pids_for_dir "$dir")"
+  if [ -z "$pids" ]; then info "${D}$name is not running${X}"; return 0; fi
+  # TERM lets Electron flush its session cleanly; the main process teardown
+  # takes the helpers with it.
+  local pid
+  for pid in $pids; do kill "$pid" 2>/dev/null || true; done
+  ok "stopped $name"
+}
+
+cmd_remove() {
+  local name="" yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -y|--yes) yes=1 ;;
+      -*)       die "unknown option: $1" ;;
+      *)        [ -z "$name" ] && name="$1" || die "unexpected argument: $1" ;;
+    esac
+    shift
+  done
+  validate_name "$name" || exit 1
+  is_default "$name" && die "refusing to remove the default profile (the normal app)"
+  # Refuse if the profiles dir (or the profile itself) is a symlink — a planted
+  # symlink could otherwise redirect rm -rf outside the intended tree.
+  [ -L "$PROFILES_DIR" ] && die "refusing: $PROFILES_DIR is a symlink"
+  local dir; dir="$(profile_dir "$name")"
+  [ -L "$dir" ] && die "refusing: profile '$name' is a symlink"
+  [ -d "$dir" ] || die "no such profile: $name"
+
+  # The resolved real path MUST live under the real PROFILES_DIR. Resolve BOTH
+  # sides (macOS /var → /private/var). Symlinks already rejected above.
+  local real real_profiles
+  real="$(CDPATH= cd -- "$dir" 2>/dev/null && pwd -P)" || die "cannot resolve $dir"
+  real_profiles="$(CDPATH= cd -- "$PROFILES_DIR" 2>/dev/null && pwd -P)" || die "cannot resolve $PROFILES_DIR"
+  case "$real/" in
+    "$real_profiles"/?*) : ;;
+    *) die "refusing to delete path outside $real_profiles: $real" ;;
+  esac
+
+  if [ "$yes" -ne 1 ]; then
+    printf 'Remove Desktop profile %s%s%s and its local session (you stay signed in elsewhere)? [y/N] ' "$B" "$name" "$X"
+    local ans; read -r ans || ans="n"
+    case "${ans:-n}" in y|Y|yes|YES) : ;; *) info "Aborted."; return 0 ;; esac
+  fi
+
+  # Stop it first so we don't delete a live profile out from under the app.
+  # Match on $dir (the profile_dir form baked into the live process args at
+  # launch), NOT $real — a symlink-resolved path won't match argv.
+  local pids; pids="$(pids_for_dir "$dir")"
+  if [ -n "$pids" ]; then
+    local pid; for pid in $pids; do kill "$pid" 2>/dev/null || true; done
+    sleep 1
+  fi
+  rm -rf "$real"
+  ok "removed profile $name"
+}
+
+cmd_rename() {
+  local old="${1:-}" new="${2:-}"
+  validate_name "$old" || exit 1
+  validate_name "$new" || exit 1
+  is_default "$old" && die "cannot rename the default profile"
+  is_default "$new" && die "'$new' is reserved"
+  local od nd; od="$(profile_dir "$old")"; nd="$(profile_dir "$new")"
+  [ -d "$od" ] || die "no such profile: $old"
+  [ -e "$nd" ] && die "target already exists: $new"
+  # Refuse while running: the path is baked into the live process args, and
+  # Electron holds a lock file inside the dir.
+  [ -n "$(pids_for_dir "$od")" ] && die "'$old' is running — stop it first: ccdesktop stop $old"
+  mv "$od" "$nd"
+  ok "renamed $old → $new"
+}
+
+cmd_path() {
+  local name="${1:-}"
+  local dir; dir="$(resolve_dir "$name")" || exit 1
+  printf '%s\n' "$dir"
+}
+
+cmd_doctor() {
+  local problems=0
+  info "${B}ccdesktop doctor${X}"
+
+  local app
+  if app="$(find_app 2>/dev/null)"; then
+    local ver; ver="$(defaults read "$app/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null)"
+    ok "Claude.app: ${app/#$HOME/~}${ver:+  (v$ver)}"
+  else
+    err "Claude.app not found (set CCDESK_APP=/path/to/Claude.app)"; problems=$((problems+1))
+  fi
+
+  if [ -d "$BASE_DIR" ]; then ok "base user-data: ${BASE_DIR/#$HOME/~}"; else warn "base user-data missing (open the app once): ${BASE_DIR/#$HOME/~}"; fi
+
+  if [ -d "$CCDESK_HOME" ]; then
+    local mode; mode="$(stat -f '%Lp' "$CCDESK_HOME" 2>/dev/null)"
+    [ "$mode" = "700" ] && ok "home: ${CCDESK_HOME/#$HOME/~} (0700)" || warn "home: ${CCDESK_HOME/#$HOME/~} (mode ${mode:-?}, expected 700)"
+  else
+    info "  ${D}no profiles yet — create one: ccdesktop create <name>${X}"
+  fi
+
+  local name
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    is_default "$name" && continue
+    if is_running "$name"; then ok "profile '$name' running"; else info "  ${Y}•${X} profile '$name' stopped  ${D}(ccdesktop open $name)${X}"; fi
+  done < <(list_profiles)
+
+  info ""
+  if [ "$problems" -eq 0 ]; then ok "all good"; else err "$problems issue(s) found"; fi
+  return 0
+}
+
+cmd_help() {
+  cat <<EOF
+${B}ccdesktop${X} ${D}v${CCDESK_VERSION}${X} — run multiple Claude Desktop accounts (macOS)
+
+  ${C}list${X}                     profiles + which are running
+  ${C}open${X} <name>              launch the app as <name>  ${D}(alias: use)${X}
+  ${C}create${X} <name>            add a profile, then launch to sign in
+  ${C}running${X}                  show running profiles + pids
+  ${C}stop${X} <name>              quit a profile's instance
+  ${C}remove${X} / ${C}rename${X} <name>   delete / rename a profile
+  ${C}path${X} <name>              print a profile's user-data dir
+  ${C}doctor${X}                   health check
+  ${C}help${X} / ${C}version${X}
+
+  ${D}two at once →  ccdesktop open work   ccdesktop open personal${X}
+  ${D}first launch of a profile shows a fresh login; the session then persists.${X}
+
+${B}CREATE OPTIONS${X}
+  --isolated        Don't seed anything (clean profile)
+  --no-launch       Create only; launch later with 'open'
+  --share-from <dir>  Seed MCP config from <dir> instead of the base app dir
+
+${B}HOW IT WORKS${X}
+  A profile is a Chromium --user-data-dir under ${PROFILES_DIR/#$HOME/~}.
+  Each has its own login session and MCP config (${SEED_COPY[0]}).
+  'default' / 'main' = the normal app (${BASE_DIR/#$HOME/~}).
+  ccdesktop stores ZERO credentials — the login lives in the profile dir,
+  encrypted by the app's 'Claude Safe Storage' Keychain key.
+
+  Note: managed profiles share one Dock icon (same app bundle) and can't be
+  told apart in ⌘-Tab. For distinct icons, clone the .app with a new bundle id.
+  Override the app path with CCDESK_APP, the home dir with CCDESK_HOME.
+EOF
+}
+
+# ---- dispatch ----------------------------------------------------------------
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    list|ls)            cmd_list "$@" ;;
+    open|use|launch|start) cmd_open "$@" ;;
+    create|new)         cmd_create "$@" ;;
+    running|ps)         cmd_running "$@" ;;
+    stop|quit|kill)     cmd_stop "$@" ;;
+    remove|rm|delete)   cmd_remove "$@" ;;
+    rename|mv)          cmd_rename "$@" ;;
+    path|dir)           cmd_path "$@" ;;
+    doctor)             cmd_doctor "$@" ;;
+    version|--version|-V) printf 'ccdesktop %s\n' "$CCDESK_VERSION" ;;
+    help|-h|--help)     cmd_help "$@" ;;
+    *)                  err "unknown command: $cmd"; info "run 'ccdesktop help'"; exit 1 ;;
+  esac
+}
+
+main "$@"

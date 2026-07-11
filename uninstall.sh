@@ -59,6 +59,14 @@ for d in "${CCENV_BIN_DIR:-}" "/opt/homebrew/bin" "/usr/local/bin" "$HOME/.local
     if [ -f "$d/../install.sh" ] && [ -f "$d/../shell/ccenv.sh" ]; then continue; fi
     rm -f "$d/ccenv" && ok "removed $d/ccenv (copied binary)"
   fi
+  # Bundled macOS sibling: remove ccdesktop the same way (never a repo checkout's).
+  if [ -L "$d/ccdesktop" ]; then
+    rm -f "$d/ccdesktop" && ok "removed $d/ccdesktop"
+  elif [ -f "$d/ccdesktop" ] && grep -q 'CCDESK_VERSION=' "$d/ccdesktop" 2>/dev/null; then
+    if [ ! -f "$d/../install.sh" ] || [ ! -f "$d/../shell/ccenv.sh" ]; then
+      rm -f "$d/ccdesktop" && ok "removed $d/ccdesktop (copied binary)"
+    fi
+  fi
 done
 
 # Atomically strip ccenv lines from an rc file (preserve mode; temp in same

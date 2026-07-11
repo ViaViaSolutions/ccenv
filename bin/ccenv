@@ -20,7 +20,7 @@
 # Usage: ccenv help
 set -uo pipefail
 
-CCENV_VERSION="1.7.2"
+CCENV_VERSION="1.7.3"
 
 # ---- paths -------------------------------------------------------------------
 CCENV_HOME="${CCENV_HOME:-$HOME/.ccenv}"
@@ -818,6 +818,34 @@ bg_refresh_version() {
   ) >/dev/null 2>&1 &
 }
 
+# macOS bundle sibling: ccdesktop runs multiple Claude Desktop (the macOS app)
+# accounts — the GUI counterpart to ccenv — and ships alongside it on macOS.
+# This installs it next to the ccenv binary: backfilling it for existing users
+# who predate the bundle, or refreshing it on a later update. Best-effort and
+# non-fatal — a failure here never aborts an in-progress ccenv update. No-op off
+# macOS (Claude Desktop is a macOS app; Linux/Windows have no Desktop client).
+sync_ccdesktop() { # bindir baseurl
+  [ "$(uname -s 2>/dev/null)" = "Darwin" ] || return 0
+  local dir="$1" base="$2" desk="$1/ccdesktop" dtmp ev existed=0
+  [ -d "$dir" ] && [ -w "$dir" ] || return 0
+  [ -e "$desk" ] && existed=1
+  ev="install"; [ "$existed" -eq 1 ] && ev="update"
+  dtmp="$(mktemp "$desk.ccenv-update.XXXXXX" 2>/dev/null)" || return 0
+  # Validate it looks like the real ccdesktop before trusting it (reject HTML
+  # error pages / truncated bodies), mirroring the ccenv self-update check.
+  if fetch "$base/bin/ccdesktop?e=$ev" "$dtmp" 2>/dev/null \
+     && head -n1 "$dtmp" | grep -q '^#!' && grep -q 'CCDESK_VERSION=' "$dtmp"; then
+    chmod +x "$dtmp" 2>/dev/null || true
+    if mv "$dtmp" "$desk" 2>/dev/null; then
+      if [ "$existed" -eq 1 ]; then info "  ${D}refreshed bundled ccdesktop${X}"
+      else ok "installed ccdesktop → $desk  ${D}(run multiple Claude Desktop accounts)${X}"; fi
+      return 0
+    fi
+  fi
+  rm -f "$dtmp" 2>/dev/null
+  return 0
+}
+
 # Update ccenv in place to the latest build published at CCENV_BASE_URL.
 # ALWAYS fetches from the hosted build (ccenv.dev by default), for every install
 # type. A clone install's PATH entry is a symlink into the repo; we replace that
@@ -855,7 +883,11 @@ cmd_update() {
 
   local newver oldver; newver="$(version_of "$tmp")"; oldver="$CCENV_VERSION"
   if [ "$newver" = "$oldver" ] && [ "$force" -eq 0 ]; then
-    rm -f "$tmp"; ok "already up to date (v$oldver)"; return 0
+    rm -f "$tmp"
+    # Backfill/refresh the bundled sibling — but NEVER on --check, which must stay
+    # read-only (this branch precedes and shadows the --check early-return below).
+    [ "$check" -eq 1 ] || sync_ccdesktop "$dir" "$base"
+    ok "already up to date (v$oldver)"; return 0
   fi
   if [ "$check" -eq 1 ]; then
     rm -f "$tmp"; info "current v$oldver → available ${B}v$newver${X}   ${D}run: ccenv update${X}"; return 0
@@ -880,6 +912,8 @@ cmd_update() {
       [ -n "$stmp" ] && rm -f "$stmp"
     fi
   fi
+
+  sync_ccdesktop "$dir" "$base"   # keep the bundled macOS sibling in lockstep
 
   if [ "$newver" = "$oldver" ]; then ok "reinstalled ccenv v$newver"; else ok "updated ccenv v$oldver → ${B}v$newver${X}"; fi
   info "  ${D}restart open shells to pick up the refreshed integration${X}"
@@ -955,6 +989,15 @@ cmd_uninstall() {
       # a repo checkout's own bin/ccenv (e.g. ./bin/ccenv uninstall).
       if [ -f "$d/../install.sh" ] && [ -f "$d/../shell/ccenv.sh" ]; then continue; fi
       rm -f "$d/ccenv" && ok "removed $d/ccenv (copied binary)" && removed=1
+    fi
+    # Bundled macOS sibling: remove ccdesktop the same way (symlink, or a copy we
+    # can prove is ours; never a repo checkout's own bin/ccdesktop).
+    if [ -L "$d/ccdesktop" ]; then
+      rm -f "$d/ccdesktop" && ok "removed $d/ccdesktop"
+    elif [ -f "$d/ccdesktop" ] && grep -q 'CCDESK_VERSION=' "$d/ccdesktop" 2>/dev/null; then
+      if [ ! -f "$d/../install.sh" ] || [ ! -f "$d/../shell/ccenv.sh" ]; then
+        rm -f "$d/ccdesktop" && ok "removed $d/ccdesktop (copied binary)"
+      fi
     fi
   done
   [ "$removed" -eq 0 ] && warn "no installed ccenv found in the usual bin dirs"
@@ -1195,6 +1238,11 @@ ${B}SHARED vs PER-PROFILE${X}
   Fresh per profile:    sessions, projects, history, credentials
   Custom hooks run with CLAUDE_CONFIG_DIR set to the active profile — keep them
   account-agnostic if you run accounts concurrently.
+
+${B}CLAUDE DESKTOP (macOS)${X}
+  ccdesktop is bundled on macOS — the same idea for the Claude Desktop app: run
+  multiple accounts at once, each account in its own window. 'ccenv update' keeps
+  it current (and backfills it if you predate the bundle). See 'ccdesktop help'.
 
 ${B}SECURITY${X}
   Tokens stay in the OS credential store (macOS Keychain, or a per-profile

@@ -19,6 +19,10 @@ REPO=""
 BASE_URL="${CCENV_BASE_URL:-https://ccenv.dev}"
 BIN_SRC="${REPO:+$REPO/bin/ccenv}"
 SHELL_SRC="${REPO:+$REPO/shell/ccenv.sh}"
+# ccdesktop (run multiple Claude Desktop app accounts) is bundled on macOS only —
+# the Desktop app is a macOS/Windows product and this tool targets macOS.
+DESK_SRC="${REPO:+$REPO/bin/ccdesktop}"
+IS_MAC=0; [ "$(uname -s 2>/dev/null)" = "Darwin" ] && IS_MAC=1
 WEB_INSTALL=0
 
 B=$'\033[1m'; G=$'\033[32m'; Y=$'\033[33m'; C=$'\033[36m'; D=$'\033[2m'; X=$'\033[0m'
@@ -36,6 +40,7 @@ fetch(){ # url dest
 if [ -f "$BIN_SRC" ] && [ -f "$SHELL_SRC" ]; then
   chmod +x "$BIN_SRC" 2>/dev/null || true
   [ -f "$REPO/uninstall.sh" ] && chmod +x "$REPO/uninstall.sh" 2>/dev/null || true
+  [ -f "$DESK_SRC" ] && chmod +x "$DESK_SRC" 2>/dev/null || true
   # The installed binary & shell snippet run code from $REPO. If others can write
   # there, they can run code as you on shell startup. Warn on a writable repo.
   if [ -n "$(find "$REPO" -maxdepth 0 -perm -0022 2>/dev/null)" ]; then
@@ -56,6 +61,20 @@ else
   chmod +x "$DL_TMP/ccenv"
   BIN_SRC="$DL_TMP/ccenv"
   SHELL_SRC="$DL_TMP/ccenv.sh"
+  # macOS: also fetch the bundled ccdesktop. Non-fatal — if it fails or looks
+  # wrong we skip it (ccenv still installs) and `ccenv update` backfills it later.
+  if [ "$IS_MAC" -eq 1 ]; then
+    if fetch "$BASE_URL/bin/ccdesktop?e=install" "$DL_TMP/ccdesktop" 2>/dev/null \
+       && head -n1 "$DL_TMP/ccdesktop" | grep -q '^#!' \
+       && grep -q 'CCDESK_VERSION=' "$DL_TMP/ccdesktop"; then
+      chmod +x "$DL_TMP/ccdesktop"; DESK_SRC="$DL_TMP/ccdesktop"
+    else
+      warn "could not fetch ccdesktop (skipping; run 'ccenv update' later to add it)"
+      DESK_SRC=""
+    fi
+  else
+    DESK_SRC=""
+  fi
 fi
 
 # CCENV_HOME backs a copied, user-owned shell snippet (so shell startup does
@@ -128,6 +147,22 @@ else
     ok "installed ccenv → $BIN_DIR/ccenv  ${D}(re-run the curl command to update)${X}"
   else
     ok "installed ccenv → $BIN_DIR/ccenv  ${D}(copy; re-run install.sh to update)${X}"
+  fi
+fi
+
+# ---- 1b. ccdesktop (macOS bundle sibling) -------------------------------------
+# Same install shape as ccenv: symlink from a clone (auto-updates on git pull),
+# copy on web install. Only on macOS, and only when we have a source for it.
+if [ "$IS_MAC" -eq 1 ] && [ -n "${DESK_SRC:-}" ] && [ -f "$DESK_SRC" ]; then
+  for d in "${CANDIDATES[@]}"; do
+    [ "$d" = "$BIN_DIR" ] && continue
+    [ -L "$d/ccdesktop" ] && rm -f "$d/ccdesktop" && step "removed stale link $d/ccdesktop"
+  done
+  if [ "$WEB_INSTALL" -eq 0 ] && ln -sf "$DESK_SRC" "$BIN_DIR/ccdesktop" 2>/dev/null; then
+    ok "installed ccdesktop → $BIN_DIR/ccdesktop  ${D}(→ $DESK_SRC)${X}"
+  else
+    cp "$DESK_SRC" "$BIN_DIR/ccdesktop" && chmod +x "$BIN_DIR/ccdesktop"
+    ok "installed ccdesktop → $BIN_DIR/ccdesktop"
   fi
 fi
 
@@ -206,3 +241,7 @@ printf '  %sccenv list%s            your current account shows as "default"\n' "
 printf '  %sccenv create work%s     add another account\n' "$C" "$X"
 printf '  %sccenv use work%s        point this shell at it\n' "$C" "$X"
 printf '  %sccenv default work%s    …or auto-use it in every new shell\n' "$C" "$X"
+if [ "$IS_MAC" -eq 1 ] && [ -e "$BIN_DIR/ccdesktop" ]; then
+  printf '\n%sAlso installed (macOS):%s multiple Claude Desktop accounts\n' "$B" "$X"
+  printf '  %sccdesktop create work%s   open a 2nd Claude Desktop account\n' "$C" "$X"
+fi
