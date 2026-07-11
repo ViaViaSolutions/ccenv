@@ -21,7 +21,9 @@ export function middleware(req: NextRequest, event: NextFetchEvent) {
     const kind =
       pathname === "/install.sh"
         ? "install.sh"
-        : `bin:${tag(searchParams.get("e")) ?? "untagged"}`;
+        : pathname === "/bin/ccdesktop"
+          ? `ccdesktop:${tag(searchParams.get("e")) ?? "untagged"}`
+          : `bin:${tag(searchParams.get("e")) ?? "untagged"}`;
     const day = new Date().toISOString().slice(0, 10); // UTC YYYY-MM-DD
     event.waitUntil(
       redis
@@ -41,6 +43,6 @@ function tag(e: string | null): string | null {
 }
 
 export const config = {
-  // Scope tight: middleware runs ONLY for these two paths.
-  matcher: ["/install.sh", "/bin/ccenv"],
+  // Scope tight: middleware runs ONLY for these paths.
+  matcher: ["/install.sh", "/bin/ccenv", "/bin/ccdesktop"],
 };

@@ -24,6 +24,9 @@ fi
 
 mkdir -p "$pub/bin" "$pub/shell"
 cp "$root/bin/ccenv"      "$pub/bin/ccenv"
+# ccdesktop (macOS Claude Desktop multi-account sibling) — served for install.sh /
+# `ccenv update` to fetch on macOS. Guard for older checkouts that predate it.
+if [ -f "$root/bin/ccdesktop" ]; then cp "$root/bin/ccdesktop" "$pub/bin/ccdesktop"; fi
 cp "$root/shell/ccenv.sh" "$pub/shell/ccenv.sh"
 cp "$root/install.sh"     "$pub/install.sh"
 cp "$root/uninstall.sh"   "$pub/uninstall.sh"
@@ -32,4 +35,4 @@ cp "$root/uninstall.sh"   "$pub/uninstall.sh"
 # (served at ccenv.dev/version) without downloading the whole ~40KB binary.
 grep -m1 'CCENV_VERSION=' "$root/bin/ccenv" | sed -E 's/.*"([^"]+)".*/\1/' > "$pub/version"
 
-echo "sync-dist: install.sh, uninstall.sh, bin/ccenv, shell/ccenv.sh, version → public/"
+echo "sync-dist: install.sh, uninstall.sh, bin/ccenv, bin/ccdesktop, shell/ccenv.sh, version → public/"
